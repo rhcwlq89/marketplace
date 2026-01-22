@@ -1,18 +1,6 @@
----
-title: "스프링 사전과제 가이드: 종합 과제"
-description: "실무형 Spring Boot 백엔드 개발 과제 - 온라인 마켓플레이스 API 구현"
-pubDate: 2026-02-05
-tags: ["Spring Boot", "사전과제", "Backend", "REST API", "Assignment"]
-heroImage: "../../assets/PreinterviewTaskGuide.png"
----
+# 온라인 마켓플레이스 백엔드 API 과제
 
-## 시리즈 네비게이션
-
-| 이전 | 현재 |
-|:---:|:---:|
-| [7편: Advanced Patterns](/blog/spring-boot-pre-interview-guide-7) | **종합 과제** |
-
-> 📚 **전체 로드맵**: [스프링 사전과제 가이드 로드맵](/blog/spring-boot-pre-interview-guide-1) 참고
+> [사전과제 가이드](https://rhcwlq89.github.io/) 참고
 >
 > 이 과제는 1~7편에서 다룬 모든 내용을 종합적으로 활용하는 실전 과제입니다.
 
