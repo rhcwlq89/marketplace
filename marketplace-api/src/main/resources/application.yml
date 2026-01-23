@@ -3,6 +3,9 @@ spring:
     active: local
   jpa:
     open-in-view: false
+    properties:
+      hibernate:
+        default_batch_fetch_size: 100
   servlet:
     multipart:
       max-file-size: 10MB
@@ -19,3 +22,12 @@ springdoc:
 logging:
   pattern:
     console: "[%d{yyyy-MM-dd HH:mm:ss}] [%level] [%X{requestId:-}] [%logger{36}] %msg%n"
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, info, metrics
+  endpoint:
+    health:
+      show-details: when_authorized

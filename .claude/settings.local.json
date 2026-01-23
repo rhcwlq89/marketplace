@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(./gradlew clean test:*)",
-      "Bash(./gradlew test:*)"
+      "Bash(./gradlew test:*)",
+      "Bash(npm run build:*)",
+      "Bash(wc:*)",
+      "Bash(./gradlew build:*)"
     ]
   }
 }

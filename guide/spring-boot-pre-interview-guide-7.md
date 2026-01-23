@@ -884,7 +884,31 @@ marketplace/
 └── marketplace-common/        # 공통 모듈 (Utils, Exception)
 ```
 
-### 2. 기본 모듈 구조
+### 2. 멀티 모듈 구조 옵션
+
+멀티 모듈 설계에는 두 가지 접근 방식이 있다.
+
+| 옵션 | 특징 | Service 위치 | Repository 처리 |
+|------|------|-------------|----------------|
+| **Option A (정석)** | DIP 엄격 적용 | domain 모듈 | 인터페이스/구현 분리 |
+| **Option B (간소화)** | 실용적 접근 | api 모듈 | JpaRepository 직접 사용 |
+
+<details>
+<summary>💬 어떤 옵션을 선택할까?</summary>
+
+**Option A 선택 시점**:
+- 클린 아키텍처 요구가 명시된 경우
+- 외부 연동(결제, 알림 등)이 많아 테스트 격리가 중요한 경우
+- 도메인 로직을 인프라 기술과 완전히 분리하고 싶은 경우
+
+**Option B 선택 시점**:
+- 실용적이고 간단한 구조를 원하는 경우
+- JPA/QueryDSL을 도메인 계층에서 직접 활용하고 싶은 경우
+- Repository 래핑 레이어가 단순 위임만 하는 경우
+
+대부분의 과제에서는 **Option B**로도 충분하며, 오버엔지니어링을 피할 수 있다.
+
+</details>
 
 #### settings.gradle
 
@@ -1043,13 +1067,16 @@ marketplace-common/
 dependencies {
     implementation project(':marketplace-common')
 
-    // JPA (인터페이스만)
+    // JPA
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
 
     // Validation
     implementation 'org.springframework.boot:spring-boot-starter-validation'
 }
 ```
+
+<details>
+<summary>Option A (정석) - Entity, Service, Repository 인터페이스</summary>
 
 ```
 marketplace-domain/
@@ -1068,6 +1095,35 @@ marketplace-domain/
         └── OrderService.java
 ```
 
+</details>
+
+<details open>
+<summary>Option B (간소화) - Entity만 포함</summary>
+
+```
+marketplace-domain/
+└── src/main/java/com/example/domain/
+    ├── common/
+    │   └── BaseEntity.java
+    ├── member/
+    │   ├── Member.java
+    │   └── Role.java
+    ├── product/
+    │   ├── Product.java
+    │   ├── ProductImage.java
+    │   └── ProductStatus.java
+    ├── order/
+    │   ├── Order.java
+    │   ├── OrderItem.java
+    │   └── OrderStatus.java
+    └── category/
+        └── Category.java
+```
+
+Service는 api 모듈에 위치하고, Repository는 infra 모듈의 JpaRepository를 직접 사용한다.
+
+</details>
+
 #### marketplace-infra (인프라 모듈)
 
 ```groovy
@@ -1081,13 +1137,17 @@ dependencies {
     runtimeOnly 'com.h2database:h2'
     runtimeOnly 'com.mysql:mysql-connector-j'
 
+    // QueryDSL (선택)
+    implementation 'com.querydsl:querydsl-jpa:5.0.0:jakarta'
+    annotationProcessor 'com.querydsl:querydsl-apt:5.0.0:jakarta'
+
     // Redis (선택)
     implementation 'org.springframework.boot:spring-boot-starter-data-redis'
-
-    // 외부 API 클라이언트
-    implementation 'org.springframework.boot:spring-boot-starter-webflux'
 }
 ```
+
+<details>
+<summary>Option A (정석) - Repository 구현체</summary>
 
 ```
 marketplace-infra/
@@ -1105,6 +1165,32 @@ marketplace-infra/
     └── external/
         └── PaymentGatewayClient.java
 ```
+
+</details>
+
+<details open>
+<summary>Option B (간소화) - JpaRepository + QueryDSL 직접 사용</summary>
+
+```
+marketplace-infra/
+└── src/main/java/com/example/infra/
+    ├── member/
+    │   └── MemberJpaRepository.java
+    ├── product/
+    │   ├── ProductJpaRepository.java
+    │   ├── ProductJpaRepositoryCustom.java
+    │   └── ProductJpaRepositoryImpl.java (QueryDSL)
+    ├── order/
+    │   ├── OrderJpaRepository.java
+    │   ├── OrderJpaRepositoryCustom.java
+    │   └── OrderJpaRepositoryImpl.java (QueryDSL)
+    └── category/
+        └── CategoryJpaRepository.java
+```
+
+QueryDSL Custom Repository 패턴을 사용하면 복잡한 동적 쿼리도 JpaRepository 인터페이스에 통합할 수 있다.
+
+</details>
 
 #### marketplace-api (API 모듈)
 
@@ -1138,6 +1224,9 @@ bootJar {
 }
 ```
 
+<details>
+<summary>Option A (정석) - Controller, Security만</summary>
+
 ```
 marketplace-api/
 └── src/main/java/com/example/api/
@@ -1157,19 +1246,61 @@ marketplace-api/
         └── JwtAuthenticationFilter.java
 ```
 
+</details>
+
+<details open>
+<summary>Option B (간소화) - Controller, Service, Security 포함</summary>
+
+```
+marketplace-api/
+└── src/main/java/com/example/api/
+    ├── MarketplaceApplication.java
+    ├── config/
+    │   ├── SecurityConfig.java
+    │   ├── SwaggerConfig.java
+    │   └── DataInitializer.java
+    ├── member/
+    │   ├── MembersController.java
+    │   ├── AuthController.java
+    │   ├── AuthService.java
+    │   ├── MemberService.java
+    │   └── dto/
+    ├── product/
+    │   ├── ProductController.java
+    │   ├── ProductService.java
+    │   └── dto/
+    ├── order/
+    │   ├── OrderController.java
+    │   ├── OrderService.java
+    │   ├── dto/
+    │   └── event/
+    ├── category/
+    │   ├── CategoryController.java
+    │   └── CategoryService.java
+    └── security/
+        ├── JwtTokenProvider.java
+        └── JwtAuthenticationFilter.java
+```
+
+Service가 api 모듈에 있으므로 도메인별 패키지로 구성하여 응집도를 높인다.
+
+</details>
+
 ### 4. 모듈 간 의존성 규칙
+
+#### Option A (정석) - 의존성 역전 적용
 
 ```
 ┌─────────────────┐
-│  marketplace-api │  ← 실행 모듈 (Spring Boot Application)
+│  marketplace-api │  ← Controller, Security
 ├─────────────────┤
 │     depends on   │
 ├─────────────────┤
-│ marketplace-domain │  ← 비즈니스 로직, Entity
+│ marketplace-domain │  ← Entity, Service, Repository 인터페이스
 ├─────────────────┤
-│     depends on   │
+│ (does not depend) │  ← domain은 infra를 의존하지 않음!
 ├─────────────────┤
-│ marketplace-infra │  ← DB, 외부 API 구현체
+│ marketplace-infra │  ← Repository 구현체 (domain 인터페이스 구현)
 ├─────────────────┤
 │     depends on   │
 ├─────────────────┤
@@ -1177,13 +1308,30 @@ marketplace-api/
 └─────────────────┘
 ```
 
-**핵심 규칙**:
-- `domain`은 `infra`를 의존하지 않음 (의존성 역전)
-- `domain`에는 Repository 인터페이스만 정의
-- `infra`에서 Repository 인터페이스 구현
-- `api`가 모든 모듈을 조립하여 실행
+**핵심**: domain → infra 의존 금지, Repository 인터페이스/구현 분리
 
-### 5. Repository 인터페이스와 구현 분리
+#### Option B (간소화) - 실용적 접근
+
+```
+┌─────────────────┐
+│  marketplace-api │  ← Controller, Service, Security
+├─────────────────┤
+│     depends on   │
+├─────────────────┤
+│ marketplace-domain │  ← Entity만
+│ marketplace-infra │  ← JpaRepository, QueryDSL
+├─────────────────┤
+│     depends on   │
+├─────────────────┤
+│ marketplace-common │  ← 공통 유틸, 예외
+└─────────────────┘
+```
+
+**핵심**: api가 domain과 infra를 모두 조합하여 사용. domain은 순수 Entity만 포함
+
+### 5. Repository 구현 패턴
+
+#### Option A: 인터페이스/구현 분리 (DIP)
 
 ```java
 // marketplace-domain/src/.../ProductRepository.java (인터페이스)
@@ -1230,6 +1378,133 @@ interface ProductJpaRepository extends JpaRepository<Product, Long> {
     List<Product> findByCategory(Category category);
 }
 ```
+
+#### Option B: QueryDSL Custom Repository 패턴
+
+JpaRepository에 QueryDSL을 통합하는 Spring Data 표준 패턴이다.
+
+```kotlin
+// marketplace-infra/src/.../ProductJpaRepository.kt
+interface ProductJpaRepository : JpaRepository<Product, Long>, ProductJpaRepositoryCustom {
+    fun findBySellerId(sellerId: Long, pageable: Pageable): Page<Product>
+    fun findByStatusOrderBySalesCountDesc(status: ProductStatus, pageable: Pageable): List<Product>
+}
+```
+
+```kotlin
+// marketplace-infra/src/.../ProductJpaRepositoryCustom.kt
+interface ProductJpaRepositoryCustom {
+    fun findByIdWithLock(id: Long): Optional<Product>
+    fun search(
+        keyword: String?,
+        categoryId: Long?,
+        minPrice: BigDecimal?,
+        maxPrice: BigDecimal?,
+        status: ProductStatus?,
+        sellerId: Long?,
+        pageable: Pageable
+    ): Page<Product>
+}
+```
+
+```kotlin
+// marketplace-infra/src/.../ProductJpaRepositoryImpl.kt
+class ProductJpaRepositoryImpl(
+    private val queryFactory: JPAQueryFactory
+) : ProductJpaRepositoryCustom {
+
+    private val product = QProduct.product
+
+    override fun findByIdWithLock(id: Long): Optional<Product> {
+        val result = queryFactory
+            .selectFrom(product)
+            .where(product.id.eq(id))
+            .setLockMode(LockModeType.PESSIMISTIC_WRITE)
+            .fetchOne()
+        return Optional.ofNullable(result)
+    }
+
+    override fun search(
+        keyword: String?,
+        categoryId: Long?,
+        minPrice: BigDecimal?,
+        maxPrice: BigDecimal?,
+        status: ProductStatus?,
+        sellerId: Long?,
+        pageable: Pageable
+    ): Page<Product> {
+        val content = queryFactory
+            .selectFrom(product)
+            .where(
+                keywordContains(keyword),
+                categoryIdEq(categoryId),
+                priceGoe(minPrice),
+                priceLoe(maxPrice),
+                statusEq(status),
+                sellerIdEq(sellerId),
+                notDeleted()
+            )
+            .offset(pageable.offset)
+            .limit(pageable.pageSize.toLong())
+            .orderBy(product.createdAt.desc())
+            .fetch()
+
+        val countQuery = queryFactory
+            .select(product.count())
+            .from(product)
+            .where(/* 동일 조건 */)
+
+        return PageableExecutionUtils.getPage(content, pageable) {
+            countQuery.fetchOne() ?: 0L
+        }
+    }
+
+    private fun keywordContains(keyword: String?) =
+        keyword?.takeIf { it.isNotBlank() }?.let {
+            product.name.containsIgnoreCase(it)
+                .or(product.description.containsIgnoreCase(it))
+        }
+
+    // ... 기타 조건 메서드
+}
+```
+
+```kotlin
+// Service에서 직접 JpaRepository 사용
+@Service
+class ProductService(
+    private val productJpaRepository: ProductJpaRepository,  // 직접 주입
+    private val memberJpaRepository: MemberJpaRepository,
+    private val categoryJpaRepository: CategoryJpaRepository
+) {
+    fun searchProducts(req: ProductSearchRequest, pageable: Pageable): Page<ProductResponse> {
+        return productJpaRepository.search(
+            keyword = req.keyword,
+            categoryId = req.categoryId,
+            minPrice = req.minPrice,
+            maxPrice = req.maxPrice,
+            status = req.status?.let { ProductStatus.valueOf(it) },
+            sellerId = req.sellerId,
+            pageable = pageable
+        ).map { ProductResponse.from(it) }
+    }
+}
+```
+
+<details>
+<summary>💬 Option A vs Option B 비교</summary>
+
+| 기준 | Option A (DIP) | Option B (QueryDSL Custom) |
+|------|---------------|---------------------------|
+| **추상화 수준** | 높음 (완전 분리) | 중간 (JPA 의존) |
+| **코드량** | 많음 (래퍼 필요) | 적음 |
+| **테스트 용이성** | Mock 교체 쉬움 | Spring Data 테스트 활용 |
+| **유연성** | DB 교체 용이 | JPA 생태계에 최적화 |
+| **러닝커브** | 높음 | 낮음 |
+
+**권장**: 대부분의 과제에서는 **Option B**가 적합. Option A는 외부 연동이 많거나 클린 아키텍처가 명시적으로 요구될 때 선택.
+
+</details>
 
 ### 6. 빌드 및 실행
 
@@ -1374,7 +1649,7 @@ marketplace-infra → marketplace-domain (O)
 | API 버전 전략이 일관되게 적용되어 있는가? | ⬜ |
 | 아키텍처가 과제 복잡도에 맞게 선택되었는가? | ⬜ |
 | 멀티 모듈 적용 시 의존성 방향이 올바른가? | ⬜ |
-| 멀티 모듈 적용 시 Repository 인터페이스/구현이 분리되었는가? | ⬜ |
+| 멀티 모듈 적용 시 선택한 옵션(DIP vs 간소화)이 일관되게 적용되었는가? | ⬜ |
 
 ### 핵심 포인트
 
@@ -1430,9 +1705,17 @@ marketplace-infra → marketplace-domain (O)
    - 간단한 CRUD에 Hexagonal 적용 → 복잡도만 증가
    - 과제 규모에 맞는 적절한 선택 필요
 
-5. **멀티 모듈 의존성 오류**
-   - domain이 infra를 의존하면 분리 의미 없음
-   - 순환 의존성 발생 시 빌드 실패
+5. **멀티 모듈 구조 일관성 부족**
+   - Option A 선택 시: domain이 infra를 의존하면 DIP 위반
+   - Option B 선택 시: Service를 domain에 두면 infra 접근 불가
+   - 두 옵션을 섞어서 사용하면 혼란 발생
    - Component 스캔 범위 설정 누락
 
 </details>
+
+---
+
+시리즈를 마쳤습니다! **종합 과제**에서 1~7편의 내용을 모두 활용해보세요.
+
+👉 [이전: 6편 - DevOps & Deployment](/blog/spring-boot-pre-interview-guide-6)
+👉 [다음: 종합 과제](/blog/spring-boot-pre-interview-assignment)
