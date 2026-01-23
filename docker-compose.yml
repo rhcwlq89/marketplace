@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: marketplace-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: marketplace
+      MYSQL_USER: marketplace
+      MYSQL_PASSWORD: marketplace123
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - marketplace-network
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: marketplace-app
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: marketplace
+      MYSQL_USER: marketplace
+      MYSQL_PASSWORD: marketplace123
+      JWT_SECRET: marketplace-jwt-secret-key-for-docker
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - marketplace-network
+
+volumes:
+  mysql-data:
+
+networks:
+  marketplace-network:
+    driver: bridge

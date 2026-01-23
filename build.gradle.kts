@@ -9,6 +9,9 @@ plugins {
     kotlin("kapt") version "1.9.22"
 }
 
+// QueryDSL version
+val querydslVersion = "5.0.0"
+
 allprojects {
     group = "com.example"
     version = "1.0.0"

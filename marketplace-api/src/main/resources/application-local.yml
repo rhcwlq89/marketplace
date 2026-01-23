@@ -1,0 +1,28 @@
+spring:
+  datasource:
+    url: jdbc:h2:mem:marketplace;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    driverClassName: org.h2.Driver
+    username: sa
+    password:
+  jpa:
+    hibernate:
+      ddl-auto: create
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+jwt:
+  secret: marketplace-jwt-secret-key-for-local-dev-must-be-at-least-32-characters
+  access-token-validity: 3600000   # 1 hour
+  refresh-token-validity: 604800000  # 7 days
+
+logging:
+  level:
+    root: INFO
+    org.hibernate.SQL: DEBUG
+    com.example.marketplace: DEBUG

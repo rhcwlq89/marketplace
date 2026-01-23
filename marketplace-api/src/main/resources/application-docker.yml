@@ -1,0 +1,22 @@
+spring:
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:mysql}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:marketplace}?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=Asia/Seoul
+    username: ${MYSQL_USER:marketplace}
+    password: ${MYSQL_PASSWORD:marketplace123}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MySQLDialect
+        format_sql: false
+
+jwt:
+  secret: ${JWT_SECRET:marketplace-jwt-secret-key-for-production}
+
+logging:
+  level:
+    root: INFO
+    com.example.marketplace: INFO

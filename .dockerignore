@@ -1,0 +1,17 @@
+.git
+.gitignore
+.idea
+*.iml
+build/
+*/build/
+.gradle/
+*/gradle/wrapper
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+README.md
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env
+*.log
+uploads/
