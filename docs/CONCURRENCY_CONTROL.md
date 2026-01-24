@@ -1,885 +1,722 @@
 # 재고 동시성 제어 및 Resilience 패턴 상세 가이드
 
-## 목차
-1. [문제 정의: 왜 동시성 제어가 필요한가?](#1-문제-정의-왜-동시성-제어가-필요한가)
-2. [해결책 1: 분산 락 (@DistributedLock)](#2-해결책-1-분산-락-distributedlock)
-3. [해결책 2: 원자적 재고 업데이트](#3-해결책-2-원자적-재고-업데이트)
-4. [Redis에서의 분산 락 동작 원리](#4-redis에서의-분산-락-동작-원리)
-   - [4.5 분산 락 구현 방법 비교 (Redisson vs 대안)](#45-분산-락-구현-방법-비교-redisson-vs-대안)
-   - [4.6 락 전략 선택 가이드 (낙관적 vs 비관적 vs 분산)](#46-락-전략-선택-가이드-낙관적-vs-비관적-vs-분산)
-5. [Circuit Breaker (서킷 브레이커)](#5-circuit-breaker-서킷-브레이커)
-   - [5.7 비즈니스 예외 vs 인프라 장애](#57-비즈니스-예외-vs-인프라-장애-중요)
-6. [Bulkhead (벌크헤드)](#6-bulkhead-벌크헤드)
-7. [Retry (재시도)](#7-retry-재시도)
-8. [전체 동작 흐름](#8-전체-동작-흐름)
-   - [8.2 AOP 프록시 체인 순서 (어노테이션 순서 ≠ 실행 순서)](#82-aop-프록시-체인-순서)
-9. [설정 값 상세 설명](#9-설정-값-상세-설명)
-   - [9.1 분산 락 설정 (waitTime, leaseTime 기준)](#91-분산-락-설정)
-   - [9.2 서킷 브레이커 설정](#92-서킷-브레이커-설정)
-10. [테스트 방법](#10-테스트-방법)
-11. [운영 환경 문제 해결 가이드](#11-운영-환경-문제-해결-가이드)
-    - [11.1 Redis 관련 문제](#111-redis-관련-문제)
-    - [11.2 데이터베이스 관련 문제](#112-데이터베이스-관련-문제)
-    - [11.3 동시성 관련 문제](#113-동시성-관련-문제)
-    - [11.4 Circuit Breaker 관련 문제](#114-circuit-breaker-관련-문제)
-    - [11.5 모니터링 대시보드](#115-모니터링-대시보드-필수-항목)
-    - [11.6 필수 알람 설정](#116-필수-알람-설정)
-    - [11.7 장애 대응 플레이북](#117-장애-대응-플레이북)
-    - [11.8 실제 장애 사례](#118-실제-장애-사례-및-해결)
+> **이 문서의 대상**: 마켓플레이스 시스템의 동시성 제어와 장애 대응 패턴을 이해하고자 하는 백엔드 개발자
 
 ---
 
+## TL;DR (핵심 요약)
+
+```
+재고 과잉 판매 방지 = 원자적 UPDATE (DB 조건부 갱신)
+중복 주문 방지 = 멱등성 키 또는 DB 유니크 제약 (분산 락은 오버엔지니어링)
+장애 대응 = Circuit Breaker + Bulkhead + Retry
+```
+
+| 문제 | 해결책 | 설명 |
+|-----|--------|------|
+| **재고 과잉 판매** | **Atomic Update** | `UPDATE WHERE stock >= qty` 조건부 감소 |
+| **쿠폰 중복 사용** | **Atomic Update** | `UPDATE WHERE used = false` 조건부 갱신 |
+| **중복 주문 (따닥)** | **멱등성 키** | 클라이언트 UUID + Redis 캐시 (권장) |
+| **장애 전파** | **Circuit Breaker** | 실패율 50% 초과 시 요청 차단 |
+| **리소스 고갈** | **Bulkhead** | 동시 요청 20개로 제한 |
+
+> **분산 락이 필요한 경우**: 캐시 스탬피드, 배치 중복 실행, 외부 API 제약, 장시간 리소스 선점
+
+---
+
+## 목차
+
+### Part 1: 동시성 제어
+1. [문제 정의: 왜 동시성 제어가 필요한가?](#1-문제-정의-왜-동시성-제어가-필요한가)
+2. [해결책 1: 원자적 재고 업데이트 (Overselling 방지)](#2-해결책-1-원자적-재고-업데이트-overselling-방지)
+3. [중복 주문 방지: 분산 락 vs 대안](#3-중복-주문-방지-분산-락-vs-대안)
+   - 3.1 [핵심 질문: 분산 락이 정말 필요한가?](#31-핵심-질문-분산-락이-정말-필요한가)
+   - 3.2 [권장 해결책: 멱등성 키](#32-권장-해결책-멱등성-키-idempotency-key)
+   - 3.3 [분산 락이 진짜 필요한 경우](#33-분산-락이-진짜-필요한-경우)
+4. [분산 락 심화](#4-분산-락-심화)
+   - 4.1 [Redis 동작 원리](#41-redis에서의-분산-락-동작-원리)
+   - 4.2 [구현 방법 비교 (Redisson vs 대안)](#42-분산-락-구현-방법-비교)
+   - 4.3 [락 전략 선택 가이드 (낙관적 vs 비관적 vs 분산)](#43-락-전략-선택-가이드)
+
+### Part 2: Resilience 패턴
+5. [Circuit Breaker (서킷 브레이커)](#5-circuit-breaker-서킷-브레이커)
+6. [Bulkhead (벌크헤드)](#6-bulkhead-벌크헤드)
+7. [Retry (재시도)](#7-retry-재시도)
+
+### Part 3: 통합 및 운영
+8. [전체 동작 흐름](#8-전체-동작-흐름)
+9. [설정 값 가이드](#9-설정-값-가이드)
+10. [테스트 방법](#10-테스트-방법)
+11. [운영 환경 문제 해결](#11-운영-환경-문제-해결-가이드)
+12. [FAQ (자주 묻는 질문)](#faq-자주-묻는-질문)
+
+---
+
+# Part 1: 동시성 제어
+
 ## 1. 문제 정의: 왜 동시성 제어가 필요한가?
 
-### 1.1 Race Condition (경쟁 상태) 문제
+이커머스에서 발생하는 두 가지 핵심 동시성 문제와 각각의 해결책을 알아봅니다.
 
-재고가 1개 남은 상품에 대해 2명이 동시에 주문하는 상황을 가정해봅시다:
+### 1.1 문제 1: 재고 과잉 판매 (Overselling)
+
+재고가 1개 남은 상품에 2명이 동시에 주문하는 상황:
 
 ```
-시간순서    사용자 A                    사용자 B                    재고(DB)
-────────────────────────────────────────────────────────────────────────────
-T1         재고 조회 → 1개              -                          1
-T2         -                           재고 조회 → 1개              1
-T3         1 >= 1 → 주문 가능!          -                          1
-T4         -                           1 >= 1 → 주문 가능!          1
-T5         재고 감소 (1-1=0)            -                          0
-T6         -                           재고 감소 (0-1=-1) ⚠️        -1 ❌
+시간    사용자 A              사용자 B              재고(DB)
+─────────────────────────────────────────────────────────────
+T1      재고 조회 → 1개        -                    1
+T2      -                    재고 조회 → 1개        1
+T3      1 >= 1 → 주문 가능!   -                    1
+T4      -                    1 >= 1 → 주문 가능!   1
+T5      재고 감소 (1→0)       -                    0
+T6      -                    재고 감소 (0→-1) ⚠️   -1 ❌
 ```
 
-**결과**: 재고가 1개인데 2개가 팔림 → **과잉 판매(Overselling)** 발생!
+**결과**: 재고 1개인데 2개 판매 → **과잉 판매(Overselling)** 발생!
 
-### 1.2 Check-Then-Act 취약점
+**원인**: Check-Then-Act 패턴의 취약점
 
 ```kotlin
-// ❌ 위험한 코드 (동시성 문제 있음)
+// ❌ 위험한 코드
 fun createOrder(productId: Long, quantity: Int) {
     val product = productRepository.findById(productId)
-
-    // Check: 재고 확인
-    if (product.stockQuantity >= quantity) {
-        // Act: 재고 감소
-        product.stockQuantity -= quantity  // 이 사이에 다른 트랜잭션이 끼어들 수 있음!
+    if (product.stockQuantity >= quantity) {       // Check
+        product.stockQuantity -= quantity          // Act (이 사이에 끼어듦!)
         productRepository.save(product)
     }
 }
 ```
 
-`Check`와 `Act` 사이에 다른 트랜잭션이 끼어들면 Race Condition 발생!
+> **해결책**: **원자적 UPDATE** (섹션 2에서 설명)
 
 ---
 
-## 2. 해결책 1: 분산 락 (@DistributedLock)
+### 1.2 문제 2: 중복 주문 / 쿠폰 중복 사용
 
-### 2.1 분산 락이란?
-
-여러 서버(또는 인스턴스)에서 동시에 같은 자원에 접근할 때, **한 번에 하나의 프로세스만** 해당 자원에 접근할 수 있도록 보장하는 메커니즘입니다.
+같은 사용자가 주문 버튼을 연타하거나, 쿠폰을 중복 사용하려는 상황:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Redis (Lock 저장소)                        │
-│                                                                 │
-│   Key: "order:create:user123"                                   │
-│   Value: "server1-thread-abc-uuid"                              │
-│   TTL: 30초                                                     │
-└─────────────────────────────────────────────────────────────────┘
-         ▲                    ▲                    ▲
-         │ Lock 획득 성공      │ Lock 획득 대기      │ Lock 획득 실패
-         │                    │                    │
-    ┌────┴────┐          ┌────┴────┐          ┌────┴────┐
-    │ Server1 │          │ Server2 │          │ Server3 │
-    │ (처리중) │          │ (대기중) │          │ (거부됨) │
-    └─────────┘          └─────────┘          └─────────┘
+시간    사용자 A (요청 1)         사용자 A (요청 2)         문제
+─────────────────────────────────────────────────────────────────
+T1      쿠폰 조회 → 있음           -
+T2      -                        쿠폰 조회 → 있음
+T3      쿠폰 사용 처리             -
+T4      -                        쿠폰 사용 처리             ⚠️ 중복 사용?
+T5      주문 생성 #1              -
+T6      -                        주문 생성 #2              ⚠️ 중복 주문?
 ```
 
-### 2.2 @DistributedLock 어노테이션 분석
+**해결책**:
+- **쿠폰 중복 사용** → 원자적 UPDATE로 해결 가능 (`UPDATE WHERE used = false`)
+- **중복 주문** → 멱등성 키 또는 DB 유니크 제약으로 해결
 
-```kotlin
-@Target(AnnotationTarget.FUNCTION)
-@Retention(AnnotationRetention.RUNTIME)
-annotation class DistributedLock(
-    val key: String,           // 락 키 (SpEL 표현식 지원)
-    val waitTime: Long = 5,    // 락 획득 대기 시간
-    val leaseTime: Long = 10,  // 락 보유 시간 (자동 해제)
-    val timeUnit: TimeUnit = TimeUnit.SECONDS
-)
+> **참고**: 분산 락 없이도 대부분의 경우 해결됩니다. (섹션 3에서 자세히 설명)
+
+---
+
+### 1.3 문제별 해결책 요약
+
+| 문제 | 원인 | 권장 해결책 | 비고 |
+|------|------|------------|------|
+| **재고 과잉 판매** | Check-Then-Act | **원자적 UPDATE** | 필수 |
+| **쿠폰 중복 사용** | Check-Then-Act | **원자적 UPDATE** | 필수 |
+| **중복 주문 (따닥)** | 버튼 연타 | **멱등성 키** | 권장 |
+| **캐시 스탬피드** | 캐시 만료 | **분산 락** | 선택 |
+| **배치 중복 실행** | 다중 인스턴스 | **분산 락** | 선택 |
+
 ```
-
-### 2.3 실제 사용 예시
-
-```kotlin
-@DistributedLock(key = "'order:create:' + #buyerId", waitTime = 5, leaseTime = 30)
-fun createOrder(buyerId: Long, req: CreateOrderRequest): OrderResponse {
-    // 이 블록은 동일한 buyerId에 대해 한 번에 하나만 실행됨
-}
-```
-
-**SpEL 표현식 해석**:
-- `'order:create:'` → 문자열 리터럴
-- `#buyerId` → 메서드 파라미터 `buyerId`의 값
-- 결과: `"order:create:123"` (buyerId가 123인 경우)
-
-### 2.4 AOP Aspect 동작 원리
-
-```kotlin
-@Around("@annotation(distributedLock)")
-fun around(joinPoint: ProceedingJoinPoint, distributedLock: DistributedLock): Any? {
-    // 1. 락 키 생성 (SpEL 파싱)
-    val lockKey = parseKey(joinPoint, distributedLock.key)
-    // 예: "order:create:123"
-
-    // 2. Redisson을 통해 Redis에서 락 객체 획득
-    val lock = redissonClient.getLock(lockKey)
-
-    // 3. 락 획득 시도
-    val acquired = lock.tryLock(
-        distributedLock.waitTime,   // 5초 동안 대기
-        distributedLock.leaseTime,  // 30초 후 자동 해제
-        distributedLock.timeUnit
-    )
-
-    if (!acquired) {
-        // 4a. 락 획득 실패 → 예외 발생
-        throw BusinessException(ErrorCode.LOCK_ACQUISITION_FAILED)
-    }
-
-    return try {
-        // 4b. 락 획득 성공 → 원래 메서드 실행
-        joinPoint.proceed()
-    } finally {
-        // 5. 락 해제 (현재 스레드가 보유한 경우에만)
-        if (lock.isHeldByCurrentThread) {
-            lock.unlock()
-        }
-    }
-}
-```
-
-### 2.5 주요 파라미터 설명
-
-| 파라미터 | 기본값 | 설명 |
-|---------|-------|------|
-| `waitTime` | 5초 | 락을 획득하기 위해 대기하는 최대 시간. 이 시간 내에 락을 못 얻으면 실패 |
-| `leaseTime` | 10초 | 락을 보유할 수 있는 최대 시간. 이 시간이 지나면 자동으로 락 해제 (데드락 방지) |
-
-**leaseTime이 중요한 이유**:
-```
-서버가 락을 획득한 후 크래시되면?
-→ leaseTime 후 자동 해제되어 다른 서버가 락 획득 가능
-→ 데드락(Deadlock) 방지
+┌─────────────────────────────────────────────────────────┐
+│                  일반적인 주문 처리 구조                    │
+├─────────────────────────────────────────────────────────┤
+│                                                         │
+│  요청 → [멱등성 체크] → [원자적 UPDATE] → 주문 생성 → 완료  │
+│              │                  │                       │
+│         중복 요청 방지      재고/쿠폰 보호                 │
+│                                                         │
+│  ※ 분산 락은 특수한 경우에만 필요 (섹션 3.3 참고)          │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. 해결책 2: 원자적 재고 업데이트
+## 2. 해결책 1: 원자적 재고 업데이트 (Overselling 방지)
 
-### 3.1 원자적(Atomic) 연산이란?
+### 2.1 원자적(Atomic) 연산이란?
 
-**원자적 연산**: 중간에 끊기지 않고 **한 번에 완료**되는 연산. 다른 트랜잭션이 중간에 끼어들 수 없음.
+중간에 끊기지 않고 **한 번에 완료**되는 연산. 다른 트랜잭션이 끼어들 수 없음.
 
-### 3.2 기존 방식 vs 원자적 방식
+```
+┌─────────────────────────────────────────────────────────────┐
+│  일반 방식 (3단계)                 원자적 방식 (1단계)         │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  1. SELECT stock     ← 끼어들 수 있음                        │
+│  2. 애플리케이션 계산  ← 끼어들 수 있음      vs    1. UPDATE   │
+│  3. UPDATE stock     ← 끼어들 수 있음            WHERE 조건  │
+│                                                             │
+│  ❌ Race Condition 발생              ✅ DB가 원자성 보장      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**핵심**: 조건 확인과 업데이트를 **하나의 SQL문**으로 처리하면, DB 엔진이 원자성을 보장합니다.
+
+### 2.2 비교: 기존 방식 vs 원자적 방식
 
 ```kotlin
-// ❌ 기존 방식 (비원자적)
-val product = repository.findById(id)
+// ❌ 기존 방식 (3번의 쿼리, 중간에 끼어들 수 있음)
+val product = repository.findById(id)        // SELECT
 if (product.stockQuantity >= quantity) {
     product.stockQuantity -= quantity
-    repository.save(product)
+    repository.save(product)                  // UPDATE
 }
-// → 3번의 쿼리: SELECT → 애플리케이션 로직 → UPDATE
-// → 중간에 다른 트랜잭션이 끼어들 수 있음
 
-// ✅ 원자적 방식
+// ✅ 원자적 방식 (1번의 쿼리로 조건 확인 + 업데이트)
 val updated = repository.decreaseStockAtomically(id, quantity)
-// → 1번의 쿼리로 조건 확인 + 업데이트 동시 수행
-// → 중간에 다른 트랜잭션이 끼어들 수 없음
+if (updated == 0) throw BusinessException(ErrorCode.INSUFFICIENT_STOCK)
 ```
 
-### 3.3 원자적 재고 감소 쿼리 분석
+### 2.3 원자적 재고 감소 쿼리
 
 ```kotlin
-override fun decreaseStockAtomically(productId: Long, quantity: Int): Int {
-    val updateCount = entityManager.createQuery("""
-        UPDATE Product p
-        SET p.stockQuantity = p.stockQuantity - :quantity,
-            p.salesCount = p.salesCount + :quantity,
-            p.updatedAt = :now
-        WHERE p.id = :productId
-        AND p.stockQuantity >= :quantity      -- ⭐ 핵심: 조건부 업데이트
-        AND p.status = :status
-    """)
-    .setParameter("quantity", quantity)
-    .setParameter("productId", productId)
-    .setParameter("now", LocalDateTime.now())
-    .setParameter("status", ProductStatus.ON_SALE)
-    .executeUpdate()
-
-    return updateCount  // 영향받은 행 수 (0 또는 1)
-}
+@Modifying
+@Query("""
+    UPDATE Product p
+    SET p.stockQuantity = p.stockQuantity - :quantity,
+        p.salesCount = p.salesCount + :quantity
+    WHERE p.id = :productId
+    AND p.stockQuantity >= :quantity   -- ⭐ 핵심: 조건부 업데이트
+    AND p.status = 'ON_SALE'
+""")
+fun decreaseStockAtomically(productId: Long, quantity: Int): Int
 ```
 
-**핵심 포인트**: `WHERE p.stockQuantity >= :quantity`
-
-이 조건이 있어서:
-- 재고가 충분하면 → UPDATE 성공 → `updateCount = 1`
-- 재고가 부족하면 → WHERE 조건 불만족 → UPDATE 안 됨 → `updateCount = 0`
-
-```kotlin
-val updated = productJpaRepository.decreaseStockAtomically(productId, quantity)
-if (updated == 0) {
-    throw BusinessException(ErrorCode.INSUFFICIENT_STOCK)  // 재고 부족
-}
-```
-
-### 3.4 동시 요청 시 동작
+### 2.4 동시 요청 시 동작
 
 ```
-시간순서    사용자 A                              사용자 B
-──────────────────────────────────────────────────────────────────
-           재고: 1개
+시간    사용자 A                           사용자 B
+────────────────────────────────────────────────────────────
+        재고: 1개
 
-T1         UPDATE ... WHERE stock >= 1        UPDATE ... WHERE stock >= 1
-           ↓                                   ↓
-           DB 행 락(Row Lock) 획득             DB 행 락 대기...
+T1      UPDATE WHERE stock >= 1           UPDATE WHERE stock >= 1
+        ↓                                 ↓
+        DB Row Lock 획득                   DB Row Lock 대기...
 
-T2         stock = 0으로 변경                  (대기중)
-           COMMIT
+T2      stock = 0으로 변경                 (대기중)
+        COMMIT
 
-T3         updateCount = 1 ✅                  DB 행 락 획득
-                                              stock(0) >= 1? → FALSE
-                                              WHERE 조건 불만족
+T3      updateCount = 1 ✅                 DB Row Lock 획득
+                                          stock(0) >= 1? → FALSE
 
-T4                                            updateCount = 0 ❌
-                                              → INSUFFICIENT_STOCK 예외
+T4                                        updateCount = 0 ❌
+                                          → INSUFFICIENT_STOCK
 ```
 
 **결과**: 정확히 1개만 판매됨!
 
+#### 왜 동작하는가? (DB Row Lock)
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  InnoDB (MySQL) / PostgreSQL의 Row-Level Lock               │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  UPDATE 문 실행 시:                                          │
+│  1. 해당 Row에 Exclusive Lock (X-Lock) 획득                  │
+│  2. 다른 트랜잭션은 같은 Row 수정 불가 (대기)                   │
+│  3. COMMIT 후 Lock 해제 → 다음 트랜잭션 진행                  │
+│                                                             │
+│  ※ WHERE 조건은 Lock 획득 후 재평가됨                        │
+│  → 이미 재고가 0이면 조건 불충족 → updateCount = 0           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+> **핵심**: DB 자체의 Row Lock 메커니즘이 동시성을 처리합니다. 별도의 분산 락 없이도 재고 보호가 가능한 이유입니다.
+
 ---
 
-## 4. Redis에서의 분산 락 동작 원리
+## 3. 중복 주문 방지: 분산 락 vs 대안
 
-### 4.1 Redisson의 락 구현 방식
+### 3.1 핵심 질문: 분산 락이 정말 필요한가?
 
-Redisson은 Redis의 **Lua 스크립트**를 사용하여 원자적인 락 연산을 수행합니다.
+일반적인 주문 생성에서 분산 락은 **오버엔지니어링**일 수 있습니다.
 
-#### 락 획득 (tryLock)
+| 문제 | 분산 락 필요? | 더 나은 대안 |
+|------|:------------:|-------------|
+| 재고 과잉 판매 | ❌ | 원자적 UPDATE |
+| 쿠폰 중복 사용 | ❌ | 원자적 UPDATE |
+| 중복 주문 (따닥) | ❌ | 멱등성 키, DB 유니크 |
+| 캐시 스탬피드 | ✅ | - |
+| 배치 중복 실행 | ✅ | - |
+| 외부 API 직렬화 제약 | ✅ | - |
+
+### 3.2 권장 해결책: 멱등성 키 (Idempotency Key)
+
+```kotlin
+@PostMapping("/orders")
+fun createOrder(
+    @RequestHeader("Idempotency-Key") idempotencyKey: String,
+    @RequestBody request: OrderCreateRequest
+): OrderResponse {
+    // 1. 이미 처리된 요청인지 확인
+    val cached = redisTemplate.opsForValue().get("idempotency:$idempotencyKey")
+    if (cached != null) return cached  // 이전 결과 반환
+
+    // 2. 새로운 주문 처리
+    val result = orderService.createOrder(request)
+
+    // 3. 결과 캐시 (24시간)
+    redisTemplate.opsForValue().set("idempotency:$idempotencyKey", result, 24, TimeUnit.HOURS)
+    return result
+}
+```
+
+**클라이언트 측:**
+```javascript
+const response = await fetch('/api/v1/orders', {
+    method: 'POST',
+    headers: {
+        'Idempotency-Key': crypto.randomUUID(),  // 요청마다 고유 키
+        'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(orderData)
+});
+```
+
+#### 멱등성 키 구현 시 주의사항
+
+| 상황 | 문제 | 해결 |
+|------|------|------|
+| 키 없이 요청 | 중복 방지 안 됨 | 서버에서 키 필수 검증 또는 자동 생성 |
+| 동일 키로 다른 요청 | 잘못된 결과 반환 | 키 + 요청 해시 함께 저장 |
+| 처리 중 재요청 | 중복 실행 가능 | 처리 중 상태 별도 관리 |
+| 캐시 만료 후 재요청 | 중복 주문 발생 | TTL을 비즈니스 요구에 맞게 설정 |
+
+```kotlin
+// 개선된 구현 (처리 중 상태 관리)
+fun createOrder(idempotencyKey: String, request: OrderCreateRequest): OrderResponse {
+    val cacheKey = "idempotency:$idempotencyKey"
+
+    // 1. 이미 완료된 요청 확인
+    val cached = redisTemplate.opsForValue().get(cacheKey)
+    if (cached is OrderResponse) return cached
+
+    // 2. 처리 중인지 확인 (SETNX로 원자적 체크)
+    val acquired = redisTemplate.opsForValue()
+        .setIfAbsent("$cacheKey:processing", "1", Duration.ofSeconds(30))
+    if (acquired != true) {
+        throw BusinessException(ErrorCode.REQUEST_IN_PROGRESS)  // 잠시 후 재시도 요청
+    }
+
+    try {
+        // 3. 주문 처리
+        val result = orderService.createOrder(request)
+
+        // 4. 결과 캐시
+        redisTemplate.opsForValue().set(cacheKey, result, Duration.ofHours(24))
+        return result
+    } finally {
+        redisTemplate.delete("$cacheKey:processing")
+    }
+}
+```
+
+### 3.3 분산 락이 진짜 필요한 경우
+
+#### 1. 캐시 스탬피드 (Thundering Herd) 방지
+
+```kotlin
+fun getProduct(productId: Long): Product {
+    val cached = redisTemplate.opsForValue().get("product:$productId")
+    if (cached != null) return cached
+
+    // 캐시 미스 시 1000개 요청이 동시에 DB 조회 → DB 죽음
+    val lock = redissonClient.getLock("cache:product:$productId")
+
+    return if (lock.tryLock(1, 5, TimeUnit.SECONDS)) {
+        try {
+            // Double-check
+            val recheck = redisTemplate.opsForValue().get("product:$productId")
+            if (recheck != null) return recheck
+
+            // 1개만 DB 조회
+            val product = productRepository.findById(productId)
+            redisTemplate.opsForValue().set("product:$productId", product, 1, TimeUnit.HOURS)
+            product
+        } finally {
+            lock.unlock()
+        }
+    } else {
+        Thread.sleep(100)
+        redisTemplate.opsForValue().get("product:$productId")!!
+    }
+}
+```
+
+#### 2. 다중 인스턴스 스케줄러 (배치 중복 실행 방지)
+
+```kotlin
+@Scheduled(cron = "0 0 0 * * *")
+fun dailySettlement() {
+    val lock = redissonClient.getLock("batch:daily-settlement")
+
+    if (lock.tryLock(0, 30, TimeUnit.MINUTES)) {
+        try {
+            settlementService.process()  // 30분 소요
+        } finally {
+            lock.unlock()
+        }
+    }
+    // 락 못 잡으면 다른 인스턴스가 실행 중 → 무시
+}
+```
+
+#### 3. 외부 API 직렬화 제약
+
+```kotlin
+// PG사가 동일 사용자 동시 결제 요청 시 오류 발생
+@DistributedLock(key = "'payment:' + #userId")
+fun processPayment(userId: Long, amount: Long) {
+    paymentGateway.charge(userId, amount)  // 외부 API
+}
+```
+
+#### 4. 장시간 리소스 선점 (좌석 예약)
+
+```kotlin
+fun reserveSeat(seatId: Long, userId: Long): Reservation {
+    val lock = redissonClient.getLock("seat:$seatId")
+
+    if (lock.tryLock(0, 10, TimeUnit.MINUTES)) {  // 10분간 선점
+        return Reservation(seatId, userId, expireAt = now() + 10.minutes)
+    } else {
+        throw BusinessException("이미 다른 사용자가 선택 중입니다")
+    }
+}
+```
+
+### 3.4 해결책 비교
+
+| 방법 | 구현 복잡도 | 인프라 | 적합한 상황 |
+|------|:----------:|:------:|------------|
+| **멱등성 키** | 낮음 | Redis | 중복 주문 방지 (권장) |
+| **DB 유니크 제약** | 매우 낮음 | 없음 | 단순한 중복 방지 |
+| **프론트엔드 디바운싱** | 매우 낮음 | 없음 | 1차 방어선 |
+| **분산 락** | 중간 | Redis | 캐시/배치/외부API |
+
+### 3.5 이 프로젝트의 분산 락
+
+> **참고**: 이 프로젝트에서 주문 생성에 분산 락을 적용한 것은 **학습/데모 목적**입니다.
+> 실무에서는 멱등성 키로 충분한 경우가 많습니다.
+
+```kotlin
+// 현재 구현 (학습 목적)
+@DistributedLock(key = "'order:create:' + #buyerId")
+fun createOrder(buyerId: Long, request: OrderCreateRequest): OrderResponse {
+    // ...
+}
+
+// 실무 권장 (더 가벼움)
+fun createOrder(idempotencyKey: String, request: OrderCreateRequest): OrderResponse {
+    val cached = redis.get("idempotency:$idempotencyKey")
+    if (cached != null) return cached
+    // ...
+}
+```
+
+---
+
+## 4. 분산 락 심화
+
+### 4.1 Redis에서의 분산 락 동작 원리
+
+#### Redisson의 Lua 스크립트 (락 획득)
 
 ```lua
--- Redis Lua 스크립트 (단순화된 버전)
--- KEYS[1] = 락 키 (예: "order:create:123")
--- ARGV[1] = 락 보유 시간 (leaseTime)
--- ARGV[2] = 락 소유자 ID (UUID + threadId)
+-- 락이 없으면 새로 생성
+if redis.call('exists', KEYS[1]) == 0 then
+    redis.call('hset', KEYS[1], ARGV[2], 1)      -- 소유자 ID 저장
+    redis.call('pexpire', KEYS[1], ARGV[1])      -- TTL 설정
+    return nil  -- 락 획득 성공
+end
 
-if (redis.call('exists', KEYS[1]) == 0) then
-    -- 락이 없으면 새로 생성
-    redis.call('hset', KEYS[1], ARGV[2], 1)
+-- 같은 스레드가 이미 보유 중이면 (재진입)
+if redis.call('hexists', KEYS[1], ARGV[2]) == 1 then
+    redis.call('hincrby', KEYS[1], ARGV[2], 1)   -- 카운트 증가
     redis.call('pexpire', KEYS[1], ARGV[1])
     return nil  -- 락 획득 성공
 end
 
-if (redis.call('hexists', KEYS[1], ARGV[2]) == 1) then
-    -- 같은 스레드가 이미 락을 보유중이면 (재진입 가능)
-    redis.call('hincrby', KEYS[1], ARGV[2], 1)
-    redis.call('pexpire', KEYS[1], ARGV[1])
-    return nil  -- 락 획득 성공
-end
-
--- 다른 스레드가 락을 보유중
-return redis.call('pttl', KEYS[1])  -- 남은 TTL 반환
+return redis.call('pttl', KEYS[1])  -- 남은 TTL 반환 (락 획득 실패)
 ```
 
-#### 락 해제 (unlock)
-
-```lua
--- Redis Lua 스크립트 (단순화된 버전)
-if (redis.call('hexists', KEYS[1], ARGV[2]) == 0) then
-    -- 내가 보유한 락이 아니면 무시
-    return nil
-end
-
-local counter = redis.call('hincrby', KEYS[1], ARGV[2], -1)
-if (counter > 0) then
-    -- 재진입 카운트가 남아있으면 TTL만 갱신
-    redis.call('pexpire', KEYS[1], ARGV[1])
-    return 0
-end
-
--- 카운트가 0이면 락 삭제
-redis.call('del', KEYS[1])
-redis.call('publish', KEYS[2], ARGV[3])  -- 대기중인 클라이언트에게 알림
-return 1
-```
-
-### 4.2 Redis 데이터 구조
+#### Watch Dog 자동 연장
 
 ```
-Redis Hash 구조:
-
-Key: "order:create:123"
-┌─────────────────────────────────────────┐
-│  Field                     │  Value    │
-├────────────────────────────┼───────────┤
-│  server1-uuid-thread-1     │  1        │  ← 재진입 카운트
-└─────────────────────────────────────────┘
-TTL: 30000ms
+┌─────────────────────────────────────────────────────────┐
+│  Redisson Watch Dog (백그라운드 스레드)                    │
+│                                                         │
+│  leaseTime이 명시되지 않으면 자동 활성화 (기본 30초)         │
+│  락 보유 중 leaseTime/3 (10초) 마다 TTL 갱신              │
+│                                                         │
+│  [비즈니스 로직 10초 경과] → TTL 30초로 갱신                │
+│  [비즈니스 로직 20초 경과] → TTL 30초로 갱신                │
+│  [비즈니스 로직 완료] → 락 해제                            │
+└─────────────────────────────────────────────────────────┘
 ```
 
-### 4.3 왜 Redis인가?
+#### 왜 Redis인가?
 
 | 특성 | 설명 |
 |-----|------|
-| **싱글 스레드** | Redis 명령은 순차적으로 처리되어 Race Condition 없음 |
+| **싱글 스레드** | 명령이 순차 처리되어 Race Condition 없음 |
 | **Lua 스크립트** | 여러 명령을 원자적으로 실행 |
-| **고성능** | 메모리 기반으로 밀리초 단위 응답 |
-| **Pub/Sub** | 락 해제 시 대기중인 클라이언트에게 즉시 알림 |
+| **고성능** | 메모리 기반, 밀리초 단위 응답 |
+| **Pub/Sub** | 락 해제 시 대기 클라이언트에 즉시 알림 |
 
-### 4.4 Pub/Sub 기반 대기
+---
 
-```
-┌──────────────┐                    ┌──────────────┐
-│   Server A   │                    │   Server B   │
-│  (락 보유)    │                    │  (락 대기)    │
-└──────┬───────┘                    └──────┬───────┘
-       │                                   │
-       │ 1. unlock()                       │
-       ▼                                   │
-┌──────────────────────────────────────────┼───────┐
-│                 Redis                    │       │
-│                                          │       │
-│  1. 락 삭제                               │       │
-│  2. PUBLISH "lock:channel" "unlock"  ────┼───────┼──▶ 즉시 알림 수신
-│                                          │       │
-└──────────────────────────────────────────┴───────┘
-                                                  │
-                                           3. 락 재시도
-                                                  ▼
-                                           4. 락 획득 성공!
-```
-
-**장점**: Polling 방식보다 훨씬 효율적 (CPU 낭비 없음)
-
-### 4.5 분산 락 구현 방법 비교 (Redisson vs 대안)
-
-분산 락을 구현하는 방법은 Redisson 외에도 여러 가지가 있습니다.
+### 4.2 분산 락 구현 방법 비교
 
 #### Redis 기반
 
-| 방식 | 특징 | 장점 | 단점 |
-|------|------|------|------|
-| **Redisson** | 고수준 추상화 라이브러리 | 사용 편리, 다양한 기능 (RLock, RSemaphore 등) | 의존성 추가, 러닝 커브 |
-| **Lettuce + SETNX** | Spring Data Redis 기본 | 추가 의존성 없음, 경량 | 직접 구현 필요, Watch Dog 없음 |
-| **Spring Integration** | `LockRegistry` 추상화 | Spring 생태계 통합 | 기능 제한적 |
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **Redisson** | 사용 편리, Watch Dog, 다양한 락 타입 | 의존성 추가 |
+| **Lettuce + SETNX** | 추가 의존성 없음 | 직접 구현 필요 |
+| **Spring Integration** | Spring 통합 | 기능 제한적 |
 
 #### 데이터베이스 기반
 
-| 방식 | 특징 | 장점 | 단점 |
-|------|------|------|------|
-| **SELECT FOR UPDATE** | 비관적 락 | 추가 인프라 불필요 | DB 부하, 데드락 위험 |
-| **Named Lock (MySQL)** | `GET_LOCK()` 함수 | 간단한 구현 | MySQL 전용, 커넥션 점유 |
-| **ShedLock** | 스케줄러 락 라이브러리 | 배치 작업에 적합 | 단건 요청에는 과함 |
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **SELECT FOR UPDATE** | 추가 인프라 불필요 | DB 부하, 데드락 위험 |
+| **MySQL Named Lock** | 간단한 구현 | MySQL 전용 |
+| **ShedLock** | 배치 작업에 적합 | 단건 요청에는 과함 |
 
-#### 외부 시스템 기반
+#### 대안 코드 예시
 
-| 방식 | 특징 | 장점 | 단점 |
-|------|------|------|------|
-| **ZooKeeper** | 분산 코디네이터 | 강력한 일관성 보장 | 운영 복잡, 러닝 커브 |
-| **etcd** | K8s 기본 저장소 | 클라우드 네이티브 | 별도 인프라 필요 |
-
-#### 대안 구현 예시
-
-**Lettuce (Spring Data Redis 기본)**
+**낙관적 락 (JPA @Version)**
 
 ```kotlin
-@Component
-class RedisLockService(
-    private val redisTemplate: StringRedisTemplate
-) {
-    fun <T> executeWithLock(
-        key: String,
-        leaseTime: Duration,
-        action: () -> T
-    ): T {
-        val lockKey = "lock:$key"
-        val lockValue = UUID.randomUUID().toString()
+@Entity
+class Product(
+    @Id val id: Long,
+    var stockQuantity: Int,
 
-        // 락 획득 시도 (SETNX + EXPIRE)
-        val acquired = redisTemplate.opsForValue()
-            .setIfAbsent(lockKey, lockValue, leaseTime)
+    @Version  // 버전 필드 추가
+    var version: Long = 0
+)
 
-        if (acquired != true) {
-            throw BusinessException(ErrorCode.LOCK_ACQUISITION_FAILED)
-        }
-
-        try {
-            return action()
-        } finally {
-            // 본인이 설정한 락만 해제 (Lua 스크립트로 원자성 보장)
-            val script = """
-                if redis.call('get', KEYS[1]) == ARGV[1] then
-                    return redis.call('del', KEYS[1])
-                else
-                    return 0
-                end
-            """.trimIndent()
-            redisTemplate.execute(
-                RedisScript.of(script, Long::class.java),
-                listOf(lockKey),
-                lockValue
-            )
-        }
+// 사용
+fun decreaseStock(productId: Long, quantity: Int) {
+    val product = productRepository.findById(productId)
+    product.stockQuantity -= quantity
+    try {
+        productRepository.save(product)  // 버전 불일치 시 예외
+    } catch (e: OptimisticLockingFailureException) {
+        throw BusinessException(ErrorCode.CONCURRENT_UPDATE)
     }
 }
 ```
 
-**MySQL Named Lock**
+**비관적 락 (SELECT FOR UPDATE)**
 
 ```kotlin
-@Repository
-class MySQLLockRepository(
-    private val jdbcTemplate: JdbcTemplate
-) {
-    fun <T> executeWithLock(
-        lockName: String,
-        timeout: Int,
-        action: () -> T
-    ): T {
-        // 락 획득
-        val acquired = jdbcTemplate.queryForObject(
-            "SELECT GET_LOCK(?, ?)",
-            Int::class.java,
-            lockName, timeout
-        )
+@Lock(LockModeType.PESSIMISTIC_WRITE)
+@Query("SELECT p FROM Product p WHERE p.id = :id")
+fun findByIdWithLock(id: Long): Product?
+```
 
-        if (acquired != 1) {
-            throw BusinessException(ErrorCode.LOCK_ACQUISITION_FAILED)
-        }
+**Lettuce (Spring Data Redis)**
 
-        try {
-            return action()
-        } finally {
-            jdbcTemplate.execute("SELECT RELEASE_LOCK('$lockName')")
-        }
+```kotlin
+fun <T> executeWithLock(key: String, leaseTime: Duration, action: () -> T): T {
+    val lockKey = "lock:$key"
+    val lockValue = UUID.randomUUID().toString()
+
+    val acquired = redisTemplate.opsForValue()
+        .setIfAbsent(lockKey, lockValue, leaseTime)  // SETNX + EXPIRE
+
+    if (acquired != true) {
+        throw BusinessException(ErrorCode.LOCK_ACQUISITION_FAILED)
+    }
+
+    try {
+        return action()
+    } finally {
+        // Lua 스크립트로 본인 락만 해제
+        val script = """
+            if redis.call('get', KEYS[1]) == ARGV[1] then
+                return redis.call('del', KEYS[1])
+            end
+            return 0
+        """
+        redisTemplate.execute(RedisScript.of(script, Long::class.java), listOf(lockKey), lockValue)
     }
 }
 ```
 
-**SELECT FOR UPDATE (비관적 락)**
+---
 
-```kotlin
-interface ProductRepository : JpaRepository<Product, Long> {
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query("SELECT p FROM Product p WHERE p.id = :id")
-    fun findByIdWithLock(id: Long): Product?
-}
-```
+### 4.3 락 전략 선택 가이드
 
-#### 언제 어떤 걸 쓸까?
-
-| 상황 | 권장 방식 | 이유 |
-|------|----------|------|
-| **이미 Redis 사용 중** | Redisson | 기능 풍부, 검증됨 |
-| **Redis 없이 간단하게** | SELECT FOR UPDATE | 추가 인프라 불필요 |
-| **Spring Data Redis만** | Lettuce + SETNX | 의존성 최소화 |
-| **배치/스케줄러 중복 방지** | ShedLock | 목적에 특화 |
-| **강력한 일관성 필요** | ZooKeeper | CP 시스템 |
-
-#### 이 프로젝트에서 Redisson을 선택한 이유
-
-```
-1. Watch Dog 자동 연장
-   └─ 작업이 길어지면 leaseTime 자동 연장 (데드락 방지 + 안전성)
-
-2. 다양한 락 타입
-   └─ RLock, RReadWriteLock, RSemaphore, RCountDownLatch
-
-3. Pub/Sub 기반 효율적 대기
-   └─ Polling 대신 이벤트 기반으로 락 해제 감지
-
-4. 검증된 안정성
-   └─ 대규모 서비스에서 널리 사용
-```
-
-> **💡 참고**: Lettuce로 직접 구현하면 Watch Dog 같은 기능을 직접 만들어야 합니다. 프로덕션 환경에서는 검증된 Redisson 사용을 권장합니다.
-
-### 4.6 락 전략 선택 가이드 (낙관적 vs 비관적 vs 분산)
-
-DB가 하나라면 비관적 락이나 낙관적 락으로도 동시성 문제를 해결할 수 있습니다. 어떤 락을 선택할지 결정하는 요소들을 살펴봅니다.
-
-#### 락 전략 비교
+#### 비교표
 
 | 구분 | 낙관적 락 | 비관적 락 | 분산 락 |
 |------|----------|----------|---------|
-| **방식** | 버전 체크 후 충돌 시 실패 | SELECT FOR UPDATE | Redis/ZooKeeper 외부 락 |
-| **충돌 처리** | 애플리케이션에서 재시도 | DB가 대기열 관리 | 외부 시스템이 관리 |
-| **락 범위** | 단일 레코드 | 단일 레코드/테이블 | 자유롭게 정의 가능 |
-| **구현** | `@Version` 필드 | `@Lock(PESSIMISTIC_WRITE)` | Redisson 등 |
-
-#### 판단 요소 1: 충돌 빈도 (Contention Level)
-
-```
-충돌 적음 (읽기 많음)     →  낙관적 락
-충돌 많음 (쓰기 경쟁)     →  비관적 락 or 분산 락
-```
-
-| 상황 | 권장 | 이유 |
-|------|------|------|
-| 게시글 수정 | 낙관적 락 | 동시 수정 거의 없음 |
-| 인기 상품 재고 | 비관적/분산 락 | 동시 주문 많음 |
-| 선착순 이벤트 | 분산 락 | 극심한 경쟁 |
-
-```
-낙관적 락 + 충돌 많음 = 재시도 폭발 → 성능 저하
-비관적 락 + 충돌 적음 = 불필요한 락 대기 → 성능 저하
-```
-
-#### 판단 요소 2: 락 보유 시간
-
-```
-짧은 락 (수 ms)          →  비관적 락 OK
-긴 락 (외부 API 호출 등)  →  분산 락 권장
-```
-
-| 상황 | 권장 | 이유 |
-|------|------|------|
-| 단순 재고 감소 | 비관적 락 | DB 트랜잭션 내 빠르게 처리 |
-| 결제 API 호출 포함 | 분산 락 | DB 커넥션 오래 점유하면 안 됨 |
-
-**비관적 락의 문제:**
-```
-SELECT FOR UPDATE → 외부 API 호출 (3초) → UPDATE
-                    ↑
-        이 동안 DB 커넥션 + 락 점유 → 커넥션 풀 고갈 위험
-```
-
-#### 판단 요소 3: DB 구조
-
-```
-단일 DB               →  비관적 락 가능
-Master-Slave 복제     →  비관적 락 가능 (Master에서만)
-Multi-Master/샤딩     →  분산 락 필요
-```
-
-| DB 구조 | 비관적 락 | 분산 락 |
-|---------|----------|---------|
-| 단일 DB | ✅ | ✅ (오버엔지니어링일 수 있음) |
-| Read Replica | ✅ (Master만) | ✅ |
-| Multi-Master | ❌ | ✅ |
-| 샤딩 | ❌ (샤드 간 락 불가) | ✅ |
-
-#### 판단 요소 4: 락 범위
-
-```
-단일 레코드            →  비관적/낙관적 락
-여러 레코드/테이블      →  분산 락 권장
-비즈니스 로직 단위      →  분산 락
-```
-
-| 상황 | 권장 |
-|------|------|
-| 상품 1개 재고 감소 | 비관적 락 |
-| 주문 생성 (상품 여러 개 + 쿠폰 + 포인트) | 분산 락 |
-| 사용자당 1일 1회 제한 | 분산 락 |
-
-#### 판단 요소 5: 장애 복구
-
-| 장애 상황 | 낙관적 | 비관적 | 분산 |
-|----------|--------|--------|------|
-| 애플리케이션 크래시 | 안전 | 트랜잭션 롤백으로 해제 | leaseTime 후 자동 해제 |
-| 데드락 | 없음 | 가능 | 없음 (단일 리소스) |
-| 네트워크 파티션 | - | - | 주의 필요 |
-
-#### 판단 요소 6: 성능 특성
-
-|  | 처리량(TPS) | 응답시간 | DB 부하 |
-|--|------------|----------|---------|
-| 낙관적 락 | 높음 | 낮음 | 낮음 (충돌 적을 때) |
-| 비관적 락 | 중간 | 중간 | 높음 (락 대기) |
-| 분산 락 | 높음 | 약간 높음 | 낮음 (락이 외부) |
+| **방식** | 버전 체크 후 충돌 시 실패 | SELECT FOR UPDATE | Redis/ZooKeeper |
+| **충돌 처리** | 애플리케이션 재시도 | DB 대기열 관리 | 외부 시스템 관리 |
+| **락 범위** | 단일 레코드 | 단일 레코드/테이블 | 자유롭게 정의 |
+| **구현** | `@Version` | `@Lock(PESSIMISTIC)` | Redisson 등 |
 
 #### 의사결정 플로우차트
 
 ```
-                    시작
-                      │
-                      ▼
-              ┌──────────────┐
-              │ 충돌이 자주   │
-              │ 발생하는가?   │
-              └──────────────┘
-                 │        │
-              아니오      예
-                 │        │
-                 ▼        ▼
-           ┌─────────┐  ┌──────────────┐
-           │ 낙관적  │  │ 락 보유 시간이│
-           │ 락 사용 │  │ 긴가? (>100ms)│
-           └─────────┘  └──────────────┘
-                           │        │
-                        아니오      예
-                           │        │
-                           ▼        ▼
-                    ┌─────────┐  ┌─────────┐
-                    │ DB가    │  │ 분산 락 │
-                    │ 단일?   │  │ 사용    │
-                    └─────────┘  └─────────┘
-                       │    │
-                      예   아니오
-                       │    │
-                       ▼    ▼
-                 ┌─────────┐ ┌─────────┐
-                 │ 비관적  │ │ 분산 락 │
-                 │ 락 사용 │ │ 사용    │
-                 └─────────┘ └─────────┘
+                        시작
+                          │
+                          ▼
+                  ┌───────────────┐
+                  │ 충돌이 자주    │
+                  │ 발생하는가?    │
+                  └───────────────┘
+                     │         │
+                  아니오        예
+                     │         │
+                     ▼         ▼
+              ┌──────────┐  ┌───────────────┐
+              │ 낙관적 락 │  │ 락 보유 시간이  │
+              │   사용    │  │ 긴가? (>100ms) │
+              └──────────┘  └───────────────┘
+                               │         │
+                            아니오        예
+                               │         │
+                               ▼         ▼
+                        ┌──────────┐  ┌──────────┐
+                        │  DB가    │  │ 분산 락  │
+                        │  단일?   │  │   사용   │
+                        └──────────┘  └──────────┘
+                           │    │
+                          예   아니오
+                           │    │
+                           ▼    ▼
+                     ┌─────────┐ ┌─────────┐
+                     │ 비관적  │ │ 분산 락 │
+                     │ 락 사용 │ │   사용  │
+                     └─────────┘ └─────────┘
 ```
 
-#### 실무 예시
+#### 실무 권장
 
-| 서비스 | 선택 | 이유 |
-|--------|------|------|
+| 서비스 | 권장 방식 | 이유 |
+|--------|----------|------|
 | 게시글 수정 | 낙관적 락 | 동시 수정 거의 없음 |
-| 좋아요 카운트 | 낙관적 락 or 없음 | 정확도보다 성능, 최종 일관성 |
-| 일반 상품 재고 | 비관적 락 | 적당한 트래픽, 단일 DB |
-| 인기 상품/이벤트 재고 | 분산 락 | 높은 동시성, 빠른 응답 필요 |
-| 결제 처리 | 분산 락 | 외부 API 호출, 긴 처리 시간 |
-| 포인트 차감 | 비관적 락 | 단순 연산, 짧은 트랜잭션 |
+| 좋아요 카운트 | 없음/원자적 UPDATE | 정확도보다 성능 |
+| **재고 차감** | **원자적 UPDATE** | DB 레벨에서 해결 |
+| **중복 주문 방지** | **멱등성 키** | 가볍고 효과적 |
+| **캐시 갱신** | **분산 락** | 스탬피드 방지 |
+| **배치 작업** | **분산 락** | 다중 인스턴스 |
+| **외부 API 연동** | **분산 락** | 직렬화 필요 |
 
-#### 이 프로젝트에서 분산 락을 선택한 이유
+#### 이 프로젝트에서 분산 락을 사용한 이유
 
-```
-1. 확장성 고려
-   └─ 현재는 단일 서버지만, 스케일 아웃 대비
+> **참고**: 주문 생성에 분산 락을 적용한 것은 **학습/데모 목적**입니다.
 
-2. 락 범위
-   └─ 주문 = 재고 감소 + 주문 생성 + 이벤트 발행 (여러 작업)
+**학습 목적:**
+1. Redisson 분산 락 동작 원리 이해
+2. AOP 기반 어노테이션 구현 실습
+3. Redis 기반 동시성 제어 경험
 
-3. 처리 시간
-   └─ 비즈니스 로직이 길어질 수 있음
+**실무에서는:**
+- 재고/쿠폰 → 원자적 UPDATE
+- 중복 주문 → 멱등성 키
+- 특수한 경우만 분산 락 (캐시, 배치, 외부 API)
 
-4. DB 부하 분산
-   └─ 락 관리를 Redis로 오프로드
-
-5. 유연한 키 설계
-   └─ "order:create:{buyerId}" 처럼 비즈니스 단위로 락 가능
-```
-
-> **💡 실무 팁**: 단순한 시스템이라면 비관적 락으로 시작하고, 트래픽이 늘어나면 분산 락으로 전환하는 것도 좋은 전략입니다. 처음부터 분산 락을 도입하면 오버엔지니어링이 될 수 있습니다.
+> **실무 팁**: 가장 단순한 해결책부터 시작하세요. 원자적 UPDATE → 멱등성 키 → 분산 락 순으로 검토하고, 꼭 필요한 경우에만 복잡한 솔루션을 도입하세요.
 
 ---
+
+# Part 2: Resilience 패턴
 
 ## 5. Circuit Breaker (서킷 브레이커)
 
 ### 5.1 서킷 브레이커란?
 
-전기 회로의 **차단기(Circuit Breaker)**에서 유래한 패턴입니다. 과부하 시 전기를 차단하듯, 장애가 발생한 서비스에 대한 요청을 **차단**하여 시스템 전체의 붕괴를 방지합니다.
+전기 회로의 **차단기**에서 유래. 장애가 발생한 서비스에 대한 요청을 **차단**하여 전체 시스템 붕괴 방지.
 
 ### 5.2 상태 다이어그램
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │                                         │
-                    ▼                                         │
-             ┌──────────────┐                                 │
-             │    CLOSED    │  ← 정상 상태                     │
-             │  (정상 운영)   │                                 │
-             └──────┬───────┘                                 │
-                    │                                         │
-        실패율 50% 초과                                         │
-                    │                                         │
-                    ▼                                         │
-             ┌──────────────┐                                 │
-             │     OPEN     │  ← 차단 상태                     │
-             │  (요청 차단)   │    모든 요청 즉시 실패           │
-             └──────┬───────┘                                 │
-                    │                                         │
-        10초 대기 후                                           │
-                    │                                         │
-                    ▼                                         │
-             ┌──────────────┐                                 │
-             │  HALF-OPEN   │  ← 테스트 상태                   │
-             │ (일부 허용)    │    3개 요청만 허용             │
-             └──────┬───────┘                                 │
-                    │                                         │
-          ┌─────────┴─────────┐                               │
-          │                   │                               │
-     성공률 높음           실패 지속                            │
-          │                   │                               │
-          ▼                   ▼                               │
-     CLOSED로 복귀        OPEN으로 복귀 ───────────────────────┘
+             ┌──────────────┐
+             │    CLOSED    │ ← 정상 상태
+             │  (정상 운영)  │
+             └──────┬───────┘
+                    │
+        실패율 50% 초과 ⚡
+                    │
+                    ▼
+             ┌──────────────┐
+             │     OPEN     │ ← 차단 상태 (모든 요청 즉시 실패)
+             │  (요청 차단)  │
+             └──────┬───────┘
+                    │
+            10초 대기 후
+                    │
+                    ▼
+             ┌──────────────┐
+             │  HALF-OPEN   │ ← 테스트 상태 (3개만 허용)
+             │  (일부 허용)  │
+             └──────┬───────┘
+                    │
+          ┌────────┴────────┐
+          ▼                 ▼
+     성공률 높음         실패 지속
+          │                 │
+          ▼                 ▼
+     CLOSED 복귀       OPEN 복귀
 ```
 
-### 5.3 설정 분석
+### 5.3 설정
 
 ```yaml
 resilience4j:
   circuitbreaker:
     instances:
       orderService:
-        sliding-window-size: 10           # 최근 10개 요청을 기준으로 판단
-        failure-rate-threshold: 50        # 실패율 50% 초과 시 OPEN
-        wait-duration-in-open-state: 10s  # OPEN 상태에서 10초 대기
-        permitted-number-of-calls-in-half-open-state: 3  # HALF-OPEN에서 3개만 허용
-        slow-call-duration-threshold: 2s  # 2초 이상 걸리면 "느린 호출"로 간주
-        slow-call-rate-threshold: 50      # 느린 호출 50% 초과 시 OPEN
-```
-
-### 5.4 동작 시나리오
-
-```
-요청 번호    결과      누적 실패율    상태
-─────────────────────────────────────────
-1           성공      0%            CLOSED
-2           성공      0%            CLOSED
-3           실패      33%           CLOSED
-4           실패      50%           CLOSED  ← 경계선
-5           실패      60%           CLOSED → OPEN ⚡
-6           -         -             OPEN (즉시 거부)
-7           -         -             OPEN (즉시 거부)
-...         ...       ...           OPEN (10초 대기)
-            (10초 경과)
-16          성공      -             HALF-OPEN
-17          성공      -             HALF-OPEN
-18          성공      -             HALF-OPEN → CLOSED ✅
-```
-
-### 5.5 Fallback 메서드
-
-```kotlin
-@CircuitBreaker(name = "orderService", fallbackMethod = "createOrderFallback")
-fun createOrder(buyerId: Long, req: CreateOrderRequest): OrderResponse {
-    // 주문 생성 로직
-}
-
-// 서킷이 OPEN 상태이거나 예외 발생 시 호출됨
-private fun createOrderFallback(buyerId: Long, req: CreateOrderRequest, ex: Throwable): OrderResponse {
-    log.error("Circuit breaker fallback triggered. Buyer: $buyerId, Error: ${ex.message}")
-    throw BusinessException(ErrorCode.SERVICE_UNAVAILABLE)
-}
-```
-
-### 5.6 왜 서킷 브레이커를 사용하는가?
-
-**문제 상황**: 결제 서비스가 다운됨
-```
-┌─────────────┐      ┌─────────────┐      ┌─────────────┐
-│ 주문 서비스  │─────▶│ 결제 서비스  │      │   (다운!)   │
-└─────────────┘      └─────────────┘      └─────────────┘
-       │
-       │ 타임아웃 대기 (30초)
-       │ 타임아웃 대기 (30초)
-       │ 타임아웃 대기 (30초)
-       ▼
-  리소스 고갈!
-  (스레드 풀 가득 참)
-```
-
-**서킷 브레이커 적용 후**:
-```
-┌─────────────┐      ┌─────────────┐
-│ 주문 서비스  │─ ✕ ─▶│ 결제 서비스  │
-└─────────────┘      └─────────────┘
-       │
-       │ 즉시 실패 반환 (Fast Fail)
-       ▼
-  "서비스 일시 불가" 응답
-  (리소스 보호됨)
-```
-
-**핵심 가치**:
-1. **장애 전파 방지**: 한 서비스의 장애가 전체 시스템으로 퍼지지 않음
-2. **빠른 실패(Fast Fail)**: 불필요한 대기 시간 제거
-3. **자동 복구**: 서비스가 복구되면 자동으로 정상 운영
-
-### 5.7 비즈니스 예외 vs 인프라 장애 (중요!)
-
-#### 문제 상황
-
-서킷 브레이커가 **서비스 레벨**에서 동작하면, 한 상품의 재고 소진이 **다른 상품 주문까지 차단**하는 문제가 발생합니다:
-
-```
-상품 A 재고 소진 → INSUFFICIENT_STOCK 에러 다수 발생
-                ↓
-        실패율 50% 초과 → Circuit Breaker OPEN
-                ↓
-    ❌ 상품 B, C 주문도 전부 차단됨! (잘못된 동작)
-```
-
-#### 해결책: ignore-exceptions 설정
-
-**비즈니스 예외**(재고 부족, 상품 없음 등)는 서킷 브레이커가 **무시**하도록 설정합니다:
-
-```yaml
-resilience4j:
-  circuitbreaker:
-    instances:
-      orderService:
-        sliding-window-size: 10
-        failure-rate-threshold: 50
-        wait-duration-in-open-state: 10s
-        # 👇 비즈니스 예외는 실패로 카운트하지 않음
-        ignore-exceptions:
+        sliding-window-size: 10              # 최근 10개 요청 기준
+        failure-rate-threshold: 50           # 실패율 50% 초과 시 OPEN
+        wait-duration-in-open-state: 10s     # OPEN 상태 10초 유지
+        permitted-number-of-calls-in-half-open-state: 3
+        slow-call-duration-threshold: 2s     # 2초 이상 = 느린 호출
+        slow-call-rate-threshold: 50         # 느린 호출 50% 초과 시 OPEN
+        ignore-exceptions:                   # ⚠️ 중요!
           - com.example.marketplace.common.BusinessException
 ```
 
-#### 동작 비교
+### 5.4 비즈니스 예외 vs 인프라 장애 (중요!)
 
-**설정 전 (문제 있음)**:
-```
-상품 A 재고 소진 (INSUFFICIENT_STOCK)
-    ↓ 실패로 카운트됨
-Circuit Breaker OPEN
-    ↓
-상품 B 주문 → 503 Service Unavailable ❌
-```
-
-**설정 후 (정상 동작)**:
-```
-상품 A 재고 소진 (INSUFFICIENT_STOCK)
-    ↓ 무시됨 (실패로 카운트 안 함)
-Circuit Breaker 상태 유지 (CLOSED)
-    ↓
-상품 B 주문 → 200 OK ✅
-```
-
-#### 예외 분류 가이드
-
-| 예외 유형 | 예시 | 서킷 브레이커 동작 | 이유 |
-|----------|------|------------------|------|
-| **비즈니스 예외** | 재고 부족, 상품 없음, 권한 없음 | ✅ **무시** | 정상적인 비즈니스 흐름 |
-| **인프라 장애** | DB 연결 실패, Redis 타임아웃 | ⚡ **카운트** | 시스템 장애, 보호 필요 |
-| **외부 API 장애** | 결제 서비스 다운, 배송 API 오류 | ⚡ **카운트** | 외부 의존성 장애 |
-
-#### 실제 테스트 결과
+**문제**: 서킷 브레이커가 서비스 레벨에서 동작하면, 한 상품의 재고 소진이 **다른 상품 주문까지 차단**
 
 ```
-📦 상품 3: 30개 → 0개 (재고 소진)
-    └─ 30개 주문 성공, 이후 INSUFFICIENT_STOCK
-
-📦 상품 4: 200개 → 161개 (정상 처리)
-    └─ 39개 주문 성공 ✅
-    └─ Circuit Breaker가 열리지 않음!
+상품 A 재고 소진 → INSUFFICIENT_STOCK 다수 발생
+        ↓
+실패율 50% 초과 → Circuit Breaker OPEN
+        ↓
+❌ 상품 B, C 주문도 전부 차단됨!
 ```
 
-**결론**: 상품 3의 재고가 소진되어도 상품 4 주문은 정상 처리됩니다.
-
-#### record-exceptions vs ignore-exceptions
-
-| 설정 | 설명 |
-|-----|------|
-| `record-exceptions` | 실패로 **카운트할** 예외 목록 (화이트리스트) |
-| `ignore-exceptions` | 실패로 **카운트하지 않을** 예외 목록 (블랙리스트) |
+**해결**: `ignore-exceptions`로 비즈니스 예외 제외
 
 ```yaml
-# 방법 1: 특정 예외만 카운트 (화이트리스트)
-record-exceptions:
-  - java.io.IOException
-  - java.util.concurrent.TimeoutException
-
-# 방법 2: 특정 예외는 무시 (블랙리스트) - 권장
 ignore-exceptions:
   - com.example.marketplace.common.BusinessException
 ```
 
-일반적으로 `ignore-exceptions`로 비즈니스 예외를 제외하는 방식을 권장합니다.
+| 예외 유형 | 예시 | 서킷 브레이커 | 이유 |
+|----------|------|-------------|------|
+| **비즈니스 예외** | 재고 부족, 권한 없음 | ✅ 무시 | 정상적인 비즈니스 흐름 |
+| **인프라 장애** | DB 연결 실패, 타임아웃 | ⚡ 카운트 | 시스템 장애, 보호 필요 |
 
 ---
 
@@ -887,193 +724,112 @@ ignore-exceptions:
 
 ### 6.1 벌크헤드란?
 
-**벌크헤드(Bulkhead)**는 선박의 **격벽**에서 유래한 패턴입니다. 선박에서 한 구역에 물이 차도 격벽이 다른 구역으로 물이 퍼지는 것을 막듯이, 시스템에서 특정 서비스의 과부하가 다른 서비스에 영향을 미치지 않도록 **격리**합니다.
+선박의 **격벽**에서 유래. 한 구역이 침수되어도 다른 구역으로 퍼지지 않도록 **격리**.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│                         선박 (시스템)                       │
+│                      시스템 (선박)                          │
 │  ┌─────────────┬─────────────┬─────────────┬─────────────┐ │
-│  │    구역 A    │    구역 B    │    구역 C    │    구역 D    │ │
-│  │  (주문 서비스) │  (결제 서비스) │  (상품 서비스) │  (회원 서비스) │ │
-│  │             │             │             │             │ │
-│  │  💧 침수!    │  🛡️ 안전    │  🛡️ 안전    │  🛡️ 안전    │ │
-│  │             │             │             │             │ │
+│  │  주문 서비스  │  결제 서비스  │  상품 서비스  │  회원 서비스  │ │
+│  │  💧 과부하!  │  🛡️ 안전    │  🛡️ 안전    │  🛡️ 안전    │ │
 │  └─────────────┴─────────────┴─────────────┴─────────────┘ │
-│                       ▲         ▲         ▲               │
-│                       │         │         │               │
-│                    격벽(Bulkhead)으로 격리                  │
+│                    격벽(Bulkhead)으로 격리                   │
 └───────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 설정 분석
+### 6.2 설정
 
 ```yaml
 resilience4j:
   bulkhead:
     instances:
       orderService:
-        max-concurrent-calls: 20   # 동시에 처리할 수 있는 최대 요청 수
+        max-concurrent-calls: 20   # 동시 최대 20개
         max-wait-duration: 0s      # 대기 없이 즉시 거부
 ```
 
-### 6.3 동작 원리
-
-```
-동시 요청: 25개
-┌────────────────────────────────────────────────────────┐
-│                                                        │
-│    처리 중 (20개)                   대기열 (5개)          │
-│  ┌───┬───┬───┬───┬───┐          ┌───┬───┬───┬───┬───┐ │
-│  │ 1 │ 2 │ 3 │...│20 │          │21 │22 │23 │24 │25 │ │
-│  └───┴───┴───┴───┴───┘          └───┴───┴───┴───┴───┘ │
-│          │                              │             │
-│          ▼                              ▼             │
-│       처리 진행                   max-wait-duration=0s  │
-│                                  → 즉시 BulkheadFullException │
-│                                                        │
-└────────────────────────────────────────────────────────┘
-```
-
-### 6.4 왜 벌크헤드를 사용하는가?
-
-**문제 상황**: 주문 서비스에 대량 요청 → 전체 스레드 풀 점유
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    공유 스레드 풀 (100개)                  │
-│                                                         │
-│  주문 요청  주문 요청  주문 요청  주문 요청  ...  주문 요청    │
-│  [Thread1] [Thread2] [Thread3] [Thread4]     [Thread100] │
-│                                                         │
-│  ⚠️ 상품 조회, 회원 조회 등 다른 요청 처리 불가!             │
-└─────────────────────────────────────────────────────────┘
-```
-
-**벌크헤드 적용 후**:
-```
-┌─────────────────────────────────────────────────────────┐
-│                    전체 스레드 풀 (100개)                  │
-│                                                         │
-│  ┌───────────────┐ ┌───────────────┐ ┌───────────────┐ │
-│  │ 주문 서비스    │ │ 상품 서비스    │ │ 회원 서비스    │ │
-│  │ (최대 20개)   │ │ (최대 30개)   │ │ (최대 50개)   │ │
-│  │              │ │              │ │              │ │
-│  │ ██████████   │ │ ████         │ │ ██████       │ │
-│  │ (20개 사용중) │ │ (4개 사용중)  │ │ (6개 사용중)  │ │
-│  └───────────────┘ └───────────────┘ └───────────────┘ │
-│                                                         │
-│  ✅ 주문 폭주해도 다른 서비스는 정상 운영!                   │
-└─────────────────────────────────────────────────────────┘
-```
+**효과**: 주문 폭주해도 다른 서비스는 정상 운영!
 
 ---
 
 ## 7. Retry (재시도)
 
-### 7.1 설정 분석
+### 7.1 설정
 
 ```yaml
 resilience4j:
   retry:
     instances:
       orderService:
-        max-attempts: 3                # 최대 3번 시도
-        wait-duration: 500ms           # 재시도 간 500ms 대기
-        retry-exceptions:              # 이 예외들만 재시도
+        max-attempts: 3               # 최대 3회 시도
+        wait-duration: 500ms          # 재시도 간 500ms 대기
+        retry-exceptions:             # 이 예외들만 재시도
           - java.io.IOException
           - java.util.concurrent.TimeoutException
 ```
 
-### 7.2 동작 원리
-
-```
-시도 1                  시도 2                  시도 3
-  │                      │                      │
-  ▼                      ▼                      ▼
-┌──────┐  실패        ┌──────┐  실패        ┌──────┐
-│ 요청  │─────────────▶│ 재시도 │─────────────▶│ 재시도 │
-└──────┘   500ms 대기  └──────┘   500ms 대기  └──────┘
-                                                │
-                                          성공 또는 최종 실패
-```
-
-### 7.3 지수 백오프(Exponential Backoff)
-
-더 고급 설정으로 재시도 간격을 점점 늘릴 수 있습니다:
+### 7.2 지수 백오프
 
 ```yaml
 retry:
   instances:
     orderService:
-      max-attempts: 5
-      wait-duration: 1s
       enable-exponential-backoff: true
       exponential-backoff-multiplier: 2
+      # 1초 → 2초 → 4초 → 8초 (점점 간격 증가)
 ```
 
+### 7.3 재시도하면 안 되는 경우
+
+| 예외 유형 | 재시도? | 이유 |
+|----------|:------:|------|
+| `IOException`, `TimeoutException` | ✅ | 일시적 네트워크 오류 |
+| `INSUFFICIENT_STOCK` | ❌ | 재시도해도 결과 동일 |
+| `INVALID_REQUEST` (400) | ❌ | 요청 자체가 잘못됨 |
+| `UNAUTHORIZED` (401) | ❌ | 인증 필요 |
+| `DUPLICATE_ORDER` | ❌ | 이미 처리된 요청 |
+| `OutOfMemoryError` | ❌ | 시스템 문제, 재시도 무의미 |
+
+```yaml
+retry:
+  instances:
+    orderService:
+      retry-exceptions:           # 이 예외들만 재시도
+        - java.io.IOException
+        - java.util.concurrent.TimeoutException
+      ignore-exceptions:          # 이 예외들은 재시도 안 함
+        - com.example.marketplace.common.BusinessException
 ```
-시도 1 → 실패 → 1초 대기
-시도 2 → 실패 → 2초 대기 (1 × 2)
-시도 3 → 실패 → 4초 대기 (2 × 2)
-시도 4 → 실패 → 8초 대기 (4 × 2)
-시도 5 → 성공 또는 최종 실패
-```
+
+> **주의**: 재시도 가능한 작업인지 확인하세요. 결제 API처럼 부작용이 있는 작업은 멱등성이 보장되지 않으면 재시도가 위험합니다.
 
 ---
 
+# Part 3: 통합 및 운영
+
 ## 8. 전체 동작 흐름
 
-### 8.1 주문 생성 시 전체 프로세스
+### 8.1 주문 생성 프로세스
 
 ```
-사용자 요청: POST /api/v1/orders
+POST /api/v1/orders
       │
       ▼
-┌─────────────────────────────────────────────────────────────┐
-│  1. Rate Limiter 체크                                        │
-│     └─ 초당 10개 초과? → 429 Too Many Requests               │
-└─────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────┐
-│  2. Bulkhead 체크                                            │
-│     └─ 동시 요청 20개 초과? → 503 Service Unavailable         │
-└─────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────┐
-│  3. Circuit Breaker 체크                                     │
-│     └─ OPEN 상태? → Fallback 실행 → 503 Service Unavailable  │
-└─────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────┐
-│  4. Distributed Lock 획득 (Redis)                            │
-│     └─ 락 키: "order:create:{buyerId}"                       │
-│     └─ 5초 내 획득 실패? → 409 Lock Acquisition Failed        │
-└─────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────┐
-│  5. 비즈니스 로직 실행                                        │
-│     ├─ 구매자 조회                                           │
-│     ├─ 상품 조회                                             │
-│     ├─ 원자적 재고 감소 (UPDATE ... WHERE stock >= quantity)  │
-│     │   └─ updateCount = 0? → 409 Insufficient Stock        │
-│     ├─ 주문 생성                                             │
-│     └─ 이벤트 발행                                           │
-└─────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────┐
-│  6. Distributed Lock 해제 (Redis)                            │
-└─────────────────────────────────────────────────────────────┘
-      │
-      ▼
-┌─────────────────────────────────────────────────────────────┐
-│  7. Retry (IOException/TimeoutException 발생 시)             │
-│     └─ 최대 3회, 500ms 간격으로 재시도                        │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│ 1. Rate Limiter    │ 초당 10개 초과? → 429          │
+├────────────────────┼────────────────────────────────┤
+│ 2. Bulkhead        │ 동시 20개 초과? → 503          │
+├────────────────────┼────────────────────────────────┤
+│ 3. Circuit Breaker │ OPEN 상태? → 503               │
+├────────────────────┼────────────────────────────────┤
+│ 4. Distributed Lock│ 락 획득 실패? → 409            │
+├────────────────────┼────────────────────────────────┤
+│ 5. 비즈니스 로직    │ 재고 부족? → 409               │
+│    - 원자적 재고 감소                                │
+│    - 주문 생성                                      │
+├────────────────────┼────────────────────────────────┤
+│ 6. Lock 해제       │                                │
+└─────────────────────────────────────────────────────┘
       │
       ▼
    응답 반환
@@ -1081,84 +837,35 @@ retry:
 
 ### 8.2 AOP 프록시 체인 순서
 
-#### 어노테이션 순서 ≠ 실행 순서
-
-**중요**: 어노테이션 작성 순서는 AOP 적용 순서와 **무관**합니다.
-
-```kotlin
-// ❌ 이 순서는 AOP 적용 순서와 관계없음
-@Retry
-@CircuitBreaker
-@DistributedLock
-fun createOrder() { ... }
-```
+> **중요**: 어노테이션 작성 순서는 AOP 적용 순서와 **무관**합니다!
 
 #### 순서 결정 기준
 
 | 우선순위 | 방법 | 설명 |
 |---------|------|------|
 | 1 | `@Order` 어노테이션 | Aspect 클래스에 지정 |
-| 2 | `Ordered` 인터페이스 | `getOrder()` 메서드 구현 |
-| 3 | 기본값 | `Ordered.LOWEST_PRECEDENCE` (2147483647) |
+| 2 | `Ordered` 인터페이스 | 숫자가 작을수록 바깥쪽 |
 
-**숫자가 작을수록 먼저 실행 (바깥쪽)**
-
-```kotlin
-@Aspect
-@Order(1)  // 가장 먼저 (바깥쪽)
-class RetryAspect { ... }
-
-@Aspect
-@Order(2)
-class CircuitBreakerAspect { ... }
-
-@Aspect
-@Order(3)  // 가장 나중 (안쪽)
-class DistributedLockAspect { ... }
-```
-
-#### 현재 프로젝트의 순서 설정
-
-```kotlin
-// DistributedLockAspect.kt
-@Aspect
-@Component
-@Order(Ordered.HIGHEST_PRECEDENCE)  // 값: -2147483648 (가장 바깥)
-class DistributedLockAspect { ... }
-```
-
-**Resilience4j 기본 순서**:
-
-| Aspect | 기본 Order | 위치 |
-|--------|-----------|------|
-| Retry | -3 | 바깥쪽 |
-| CircuitBreaker | -2 | |
-| RateLimiter | -1 | |
-| Bulkhead | 0 | |
-| DistributedLock | HIGHEST_PRECEDENCE | 가장 바깥 |
-| @Transactional | LOWEST_PRECEDENCE | 가장 안쪽 |
-
-#### 실제 프록시 체인 구조
+#### 현재 프로젝트의 순서
 
 ```
-요청
-  │
-  ▼
+요청 → DistributedLock → Retry → CircuitBreaker → RateLimiter → Bulkhead → @Transactional → 메서드
+       (HIGHEST)         (-3)      (-2)            (-1)         (0)        (LOWEST)
+```
+
+```
 ┌─────────────────────────────────────┐
-│ DistributedLock (HIGHEST_PRECEDENCE)│  ← 락 획득
+│ DistributedLock (가장 바깥)          │  ← 락 획득
 │  ┌─────────────────────────────────┐│
-│  │ Retry (-3)                      ││  ← 재시도 래핑
+│  │ Retry                           ││  ← 재시도 래핑
 │  │  ┌─────────────────────────────┐││
-│  │  │ CircuitBreaker (-2)         │││  ← 서킷 상태 체크
+│  │  │ CircuitBreaker              │││  ← 서킷 체크
 │  │  │  ┌─────────────────────────┐│││
-│  │  │  │ RateLimiter (-1)        ││││  ← 요청률 제한
+│  │  │  │ Bulkhead                ││││  ← 동시 요청 제한
 │  │  │  │  ┌─────────────────────┐││││
-│  │  │  │  │ Bulkhead (0)        │││││  ← 동시 요청 제한
+│  │  │  │  │ @Transactional      │││││  ← 트랜잭션
 │  │  │  │  │  ┌─────────────────┐││││││
-│  │  │  │  │  │ @Transactional  │││││││  ← 트랜잭션 시작
-│  │  │  │  │  │  ┌─────────────┐│││││││
-│  │  │  │  │  │  │ 실제 메서드  ││││││││
-│  │  │  │  │  │  └─────────────┘│││││││
+│  │  │  │  │  │  실제 메서드     │││││││
 │  │  │  │  │  └─────────────────┘││││││
 │  │  │  │  └─────────────────────┘│││││
 │  │  │  └─────────────────────────┘││││
@@ -1167,204 +874,108 @@ class DistributedLockAspect { ... }
 └─────────────────────────────────────┘│
 ```
 
-#### 순서가 중요한 이유
-
-```
-❌ 잘못된 순서: CircuitBreaker → DistributedLock
-   문제점:
-   - 서킷이 열리면 락도 못 잡고 실패
-   - 락 획득 실패가 서킷 실패로 카운트됨
-   - 다른 상품 주문까지 영향
-
-✅ 올바른 순서: DistributedLock → CircuitBreaker
-   장점:
-   - 락을 먼저 잡고 비즈니스 로직 실행
-   - 서킷은 실제 비즈니스 실패만 카운트
-   - 락 실패는 서킷에 영향 없음
-```
-
-#### 순서 확인 방법 (디버깅)
-
-```kotlin
-@Aspect
-@Order(Ordered.HIGHEST_PRECEDENCE)
-class DistributedLockAspect {
-    private val log = LoggerFactory.getLogger(this::class.java)
-
-    @Around("@annotation(distributedLock)")
-    fun around(joinPoint: ProceedingJoinPoint, distributedLock: DistributedLock): Any? {
-        log.debug(">>> DistributedLock Aspect 진입")
-        try {
-            return joinPoint.proceed()
-        } finally {
-            log.debug("<<< DistributedLock Aspect 종료")
-        }
-    }
-}
-```
-
-로그 출력 예시:
-```
->>> DistributedLock Aspect 진입
->>> Retry Aspect 진입
->>> CircuitBreaker Aspect 진입
->>> Bulkhead Aspect 진입
-    [실제 비즈니스 로직 실행]
-<<< Bulkhead Aspect 종료
-<<< CircuitBreaker Aspect 종료
-<<< Retry Aspect 종료
-<<< DistributedLock Aspect 종료
-```
-
 ---
 
-## 9. 설정 값 상세 설명
+## 9. 설정 값 가이드
 
 ### 9.1 분산 락 설정
 
-| 설정 | 값 | 설명 | 권장 범위 |
-|-----|---|-----|---------|
-| `waitTime` | 5초 | 락 획득 대기 시간 | 1-10초 |
-| `leaseTime` | 30초 | 락 자동 해제 시간 | 비즈니스 로직 × 2-3배 |
+| 설정 | 기본값 | 권장 범위 | 설명 |
+|-----|-------|----------|------|
+| `waitTime` | 5초 | 1-10초 | 락 획득 대기 시간 |
+| `leaseTime` | 30초 | 로직시간×2~3 | 락 자동 해제 시간 |
 
 #### waitTime 설정 기준
 
-**핵심 원칙**: 사용자가 허용 가능한 최대 대기 시간
-
-| 고려 요소 | 설명 |
-|----------|------|
-| **사용자 경험** | 5초 이상이면 "느리다"고 느낌 |
-| **동시 요청 수** | 평균 처리 시간 × 예상 대기 순번 |
-| **비즈니스 특성** | 결제처럼 중요한 작업은 길게, 조회성은 짧게 |
+**핵심**: 사용자가 허용 가능한 최대 대기 시간
 
 ```
 예시) 주문 처리
-- 주문 처리 시간: 약 200ms
-- 동시 요청: 최대 10개 예상
-- 최악의 경우: 200ms × 10 = 2초
+- 처리 시간: ~200ms
+- 동시 요청: 최대 10개
+- 최악: 200ms × 10 = 2초
 - 여유 포함: 5초 설정
 ```
 
-| 너무 짧으면 (1초 미만) | 너무 길면 (30초 이상) |
-|----------------------|---------------------|
-| 동시 요청 시 불필요한 실패 증가 | 사용자가 오래 대기 |
-| "락 획득 실패" 에러 빈번 | UX 저하, 타임아웃 발생 |
-
 #### leaseTime 설정 기준
 
-**핵심 원칙**: `leaseTime > (예상 최대 수행 시간 × 2~3)`
-
-| 고려 요소 | 설명 |
-|----------|------|
-| **비즈니스 로직 시간** | 락 내부에서 실행되는 모든 작업 시간 |
-| **네트워크 지연** | DB, 외부 API 호출 시 지연 가능성 |
-| **GC, 시스템 지연** | JVM GC나 서버 부하로 인한 지연 |
-| **데드락 방지** | 서버 장애 시 락이 영원히 안 풀리는 상황 방지 |
+**핵심**: `leaseTime > (예상 최대 수행 시간 × 2~3)`
 
 ```kotlin
-// 주문 생성의 경우
-@DistributedLock(key = "'order:create:' + #buyerId", waitTime = 5, leaseTime = 30)
+@DistributedLock(key = "...", waitTime = 5, leaseTime = 30)
 fun createOrder(...) {
-    // 1. 상품 조회 및 검증: ~50ms
-    // 2. 재고 감소 (atomic): ~100ms
-    // 3. 주문 생성: ~50ms
-    // 4. 트랜잭션 커밋: ~50ms
-    // --------------------------
-    // 정상 케이스 합계: ~250ms
-    // 최악의 케이스 (DB 부하, 네트워크 지연): ~5-10초
-    //
+    // 정상: ~250ms
+    // 최악 (DB 부하, 네트워크 지연): ~10초
     // leaseTime = 10초 × 3 = 30초
 }
 ```
 
-| 너무 짧으면 (비즈니스 로직보다 짧게) | 너무 길면 (5분 이상) |
-|----------------------------------|-------------------|
-| ⚠️ **매우 위험!** 작업 중 락 해제 | 서버 장애 시 락이 오래 유지 |
-| 다른 요청이 락 획득 → 동시성 문제 | 해당 리소스 요청이 오래 차단 |
-
 #### 작업 유형별 권장 값
 
-| 작업 유형 | waitTime | leaseTime | 이유 |
-|----------|----------|-----------|------|
-| 조회성 캐시 갱신 | 1-2초 | 5초 | 빠른 실패, 빠른 복구 |
-| **주문/결제** | **5초** | **30초** | 중요한 작업, 충분한 여유 |
-| 배치 작업 | 10초 | 5분 | 긴 작업, 재시도 가능 |
-| 외부 API 연동 | 10초 | 60초 | 네트워크 지연 고려 |
-
-> **💡 실무 팁**: 권장 가이드를 기본값으로 설정한 뒤, 실제 운영 환경에서 메트릭(락 획득 실패율, 평균 처리 시간)을 모니터링하면서 조정합니다. 특히 P99 응답 시간을 기준으로 leaseTime을 설정하면 대부분의 요청을 커버할 수 있습니다.
+| 작업 유형 | waitTime | leaseTime |
+|----------|----------|-----------|
+| 캐시 갱신 | 1-2초 | 5초 |
+| **주문/결제** | **5초** | **30초** |
+| 배치 작업 | 10초 | 5분 |
+| 외부 API 연동 | 10초 | 60초 |
 
 ### 9.2 서킷 브레이커 설정
 
 | 설정 | 값 | 설명 |
-|-----|---|-----|
+|-----|---|------|
 | `sliding-window-size` | 10 | 실패율 계산 기준 요청 수 |
-| `failure-rate-threshold` | 50% | OPEN 전환 실패율 기준 |
-| `wait-duration-in-open-state` | 10초 | OPEN 상태 유지 시간 |
-| `permitted-number-of-calls-in-half-open-state` | 3 | HALF-OPEN에서 허용할 요청 수 |
-| `slow-call-duration-threshold` | 2초 | "느린 호출" 기준 시간 |
-| `slow-call-rate-threshold` | 50% | OPEN 전환 느린 호출 비율 기준 |
-| `ignore-exceptions` | BusinessException | 실패 카운트에서 제외할 예외 (⚠️ 중요) |
+| `failure-rate-threshold` | 50% | OPEN 전환 기준 |
+| `wait-duration-in-open-state` | 10초 | OPEN 유지 시간 |
+| `ignore-exceptions` | BusinessException | **무시할 예외 (중요!)** |
 
-> **💡 ignore-exceptions가 중요한 이유**: 비즈니스 예외(재고 부족, 잔액 부족 등)를 제외하지 않으면 정상적인 비즈니스 실패가 서킷 브레이커를 열어버려 전체 서비스에 영향을 줍니다. 자세한 내용은 [5.7 비즈니스 예외 vs 인프라 장애](#57-비즈니스-예외-vs-인프라-장애) 섹션을 참고하세요.
+### 9.3 벌크헤드/재시도 설정
 
-### 9.3 벌크헤드 설정
-
-| 설정 | 값 | 설명 |
-|-----|---|-----|
-| `max-concurrent-calls` | 20 | 동시 처리 가능한 최대 요청 수 |
-| `max-wait-duration` | 0초 | 대기열 대기 시간 (0 = 즉시 거부) |
-
-### 9.4 재시도 설정
-
-| 설정 | 값 | 설명 |
-|-----|---|-----|
-| `max-attempts` | 3 | 최대 시도 횟수 |
-| `wait-duration` | 500ms | 재시도 간 대기 시간 |
-| `retry-exceptions` | IOException, TimeoutException | 재시도 대상 예외 |
+| 구분 | 설정 | 값 |
+|------|-----|---|
+| **Bulkhead** | max-concurrent-calls | 20 |
+| | max-wait-duration | 0초 (즉시 거부) |
+| **Retry** | max-attempts | 3 |
+| | wait-duration | 500ms |
 
 ---
 
 ## 10. 테스트 방법
 
-### 10.1 동시성 테스트 (k6)
+### 10.1 k6 동시성 테스트
 
 ```javascript
-// concurrency-test.js
+// k6/concurrency-test.js
 import http from 'k6/http';
-import { check, sleep } from 'k6';
+import { check } from 'k6';
 
 export let options = {
-    vus: 100,           // 가상 사용자 100명
-    duration: '10s',    // 10초간 실행
+    vus: 10,
+    duration: '5s',
 };
 
-export default function() {
-    // 1. 로그인해서 토큰 획득
+export function setup() {
     let loginRes = http.post('http://localhost:8080/api/v1/auth/login',
         JSON.stringify({
             email: 'buyer@example.com',
-            password: 'password123'
+            password: 'buyer123!'  // 실제 비밀번호
         }),
         { headers: { 'Content-Type': 'application/json' } }
     );
+    return { token: JSON.parse(loginRes.body).data.accessToken };
+}
 
-    let token = JSON.parse(loginRes.body).data.accessToken;
-
-    // 2. 동일 상품에 동시 주문
+export default function(data) {
     let orderRes = http.post('http://localhost:8080/api/v1/orders',
         JSON.stringify({
-            orderItems: [{ productId: 1, quantity: 1 }],
+            orderItems: [{ productId: 2, quantity: 1 }],
             shippingAddress: {
-                zipCode: '12345',
-                address: 'Test Address',
-                addressDetail: 'Apt 101',
-                receiverName: 'Test User',
-                receiverPhone: '010-1234-5678'
+                zipCode: '12345', address: 'Test', addressDetail: 'Apt',
+                receiverName: 'Test', receiverPhone: '010-1234-5678'
             }
         }),
         { headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
+            'Authorization': `Bearer ${data.token}`
         }}
     );
 
@@ -1374,506 +985,302 @@ export default function() {
 }
 ```
 
-실행:
-```bash
-k6 run concurrency-test.js
-```
+실행: `k6 run k6/concurrency-test.js`
 
-### 10.2 서킷 브레이커 테스트
+### 10.2 Redis 락 확인
 
 ```bash
-# 1. 정상 요청 10개 (CLOSED 상태 확인)
-for i in {1..10}; do
-    curl -s http://localhost:8080/api/v1/products | jq '.code'
-done
-
-# 2. 서킷 브레이커 메트릭 확인
-curl http://localhost:8080/actuator/health | jq '.components.circuitBreakers'
-```
-
-### 10.3 Redis 락 확인
-
-```bash
-# Redis CLI 접속
 docker exec -it marketplace-redis redis-cli
-
-# 락 키 모니터링
-KEYS order:*
-
-# 특정 락 정보 확인
-HGETALL "order:create:1"
-TTL "order:create:1"
+> KEYS order:*
+> HGETALL "order:create:1"
+> TTL "order:create:1"
 ```
 
 ---
 
 ## 11. 운영 환경 문제 해결 가이드
 
-실제 이커머스 운영 환경에서 흔히 발생하는 문제들과 탐지/해결 방법을 정리합니다.
-
 ### 11.1 Redis 관련 문제
 
-#### Redis 연결 실패 / 타임아웃
+#### 연결 실패 / 타임아웃
 
-**증상:**
 ```
-org.redisson.client.RedisTimeoutException: Command execution timeout
-Unable to connect to Redis server
-```
-
-**탐지 방법:**
-```yaml
-# Prometheus 메트릭
-redis_connection_pool_active > threshold
-redis_command_duration_seconds > 1s
-
-# 알람 설정
-alert: RedisConnectionFailure
-  expr: redis_up == 0
-  for: 30s
+증상: RedisTimeoutException: Command execution timeout
+탐지: redis_up == 0 또는 redis_command_duration_seconds > 1s
+해결: 커넥션 풀 튜닝, HA 구성, 로컬 폴백
 ```
 
-**해결책:**
-```yaml
-# 1. 커넥션 풀 튜닝
-redisson:
-  connection-pool-size: 64
-  connection-minimum-idle-size: 24
-  timeout: 3000
-  retry-attempts: 3
+#### 락 데드락
+
 ```
-
-```kotlin
-// 2. 폴백 패턴 구현
-@Component
-class LockServiceWithFallback(
-    private val redissonClient: RedissonClient,
-    private val localLockService: LocalLockService
-) {
-    fun acquireLock(key: String): Boolean {
-        return try {
-            redissonClient.getLock(key).tryLock(5, 30, TimeUnit.SECONDS)
-        } catch (e: RedisException) {
-            log.warn("Redis 장애, 로컬 락으로 폴백: ${e.message}")
-            localLockService.tryLock(key)  // 단일 서버에서만 유효
-        }
-    }
-}
-```
-
-#### 락이 해제되지 않음 (데드락)
-
-**증상:**
-```
-특정 사용자/상품의 주문이 계속 실패
-"Lock acquisition failed" 에러 지속
-```
-
-**탐지 방법:**
-```kotlin
-// 락 상태 모니터링 API
-@GetMapping("/admin/locks")
-fun getActiveLocks(): List<LockInfo> {
-    val keys = redissonClient.keys.getKeysByPattern("lock:*")
-    return keys.map { key ->
-        val lock = redissonClient.getLock(key)
-        LockInfo(
-            key = key,
-            isLocked = lock.isLocked,
-            holdCount = lock.holdCount,
-            remainTimeToLive = lock.remainTimeToLive()
-        )
-    }
-}
-```
-
-```bash
-# Redis CLI로 확인
-redis-cli KEYS "lock:*"
-redis-cli TTL "lock:order:create:123"
-```
-
-**해결책:**
-```kotlin
-// 수동 락 해제 (관리자 기능)
-@PostMapping("/admin/locks/{key}/release")
-fun forceReleaseLock(@PathVariable key: String) {
-    val lock = redissonClient.getLock(key)
-    if (lock.isLocked) {
-        lock.forceUnlock()  // 강제 해제
-        log.warn("락 강제 해제: $key")
-    }
-}
-```
-
-#### Redis 메모리 부족
-
-**증상:**
-```
-OOM command not allowed when used memory > 'maxmemory'
-```
-
-**탐지:**
-```yaml
-# Prometheus
-redis_memory_used_bytes / redis_memory_max_bytes > 0.8
-```
-
-**해결:**
-```bash
-# maxmemory-policy 설정
-CONFIG SET maxmemory-policy allkeys-lru
-
-# 불필요한 키 정리
-redis-cli KEYS "cache:*" | xargs redis-cli DEL
+증상: 특정 사용자 주문이 계속 실패
+탐지: redis-cli KEYS "lock:*" / TTL 확인
+해결: 관리자 API로 강제 해제 (lock.forceUnlock())
 ```
 
 ### 11.2 데이터베이스 관련 문제
 
 #### 커넥션 풀 고갈
 
-**증상:**
 ```
-HikariPool-1 - Connection is not available, request timed out after 30000ms
-```
-
-**탐지 방법:**
-```yaml
-# Prometheus 메트릭
-hikaricp_connections_active / hikaricp_connections_max > 0.8
-hikaricp_connections_pending > 0
-```
-
-**해결책:**
-```yaml
-# 1. 풀 사이즈 조정
-spring:
-  datasource:
-    hikari:
-      maximum-pool-size: 50
-      minimum-idle: 10
-      connection-timeout: 30000
-      leak-detection-threshold: 60000  # 커넥션 누수 탐지
-```
-
-```kotlin
-// 2. 트랜잭션 범위 최소화
-// ❌ 나쁜 예: 외부 API 호출이 트랜잭션 안에 있음
-@Transactional
-fun createOrder() {
-    saveOrder()
-    paymentApi.call()  // 3초 대기 동안 커넥션 점유
-}
-
-// ✅ 좋은 예: 외부 호출을 트랜잭션 밖으로
-fun createOrder() {
-    val order = saveOrderInTransaction()
-    paymentApi.call()  // 트랜잭션 종료 후 호출
-    updateOrderStatus(order.id)
-}
+증상: HikariPool - Connection is not available
+탐지: hikaricp_connections_pending > 0
+해결: pool-size 증가, 트랜잭션 범위 최소화
 ```
 
 #### 슬로우 쿼리
 
-**탐지:**
-```yaml
-# MySQL 슬로우 쿼리 로그
-slow_query_log = 1
-long_query_time = 1
-
-# Hibernate 쿼리 로깅
-logging:
-  level:
-    org.hibernate.SQL: DEBUG
 ```
-
-**해결:**
-```sql
--- 1. 인덱스 추가
-CREATE INDEX idx_orders_buyer_status ON orders(buyer_id, status);
-
--- 2. 쿼리 최적화 (N+1 해결)
-SELECT o.*, oi.* FROM orders o
-JOIN order_items oi ON o.id = oi.order_id
-WHERE o.buyer_id = ?
-```
-
-#### 데드락
-
-**증상:**
-```
-Deadlock found when trying to get lock; try restarting transaction
-```
-
-**해결:**
-```kotlin
-// 락 순서 통일 (항상 ID 오름차순)
-fun decreaseStock(productIds: List<Long>) {
-    val sortedIds = productIds.sorted()  // 정렬!
-    sortedIds.forEach { id ->
-        productRepository.decreaseStock(id)
-    }
-}
+탐지: slow_query_log, Hibernate SQL 로깅
+해결: 인덱스 추가, N+1 해결
 ```
 
 ### 11.3 동시성 관련 문제
 
 #### 락 획득 실패 급증
 
-**탐지:**
-```kotlin
-// 커스텀 메트릭
-@Around("@annotation(distributedLock)")
-fun around(...): Any? {
-    meterRegistry.counter("distributed_lock",
-        "key", lockKey,
-        "result", if (acquired) "success" else "failed"
-    ).increment()
-}
 ```
+탐지: distributed_lock{result="failed"} 메트릭
+해결: waitTime 증가, 락 키 세분화
+```
+
+#### 재고 음수 (Overselling)
+
+```
+탐지: SELECT * FROM products WHERE stock_quantity < 0
+해결: DB CHECK 제약조건 추가
+```
+
+### 11.4 필수 모니터링 항목
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   System Overview                        │
+├─────────────────┬─────────────────┬─────────────────────┤
+│ Request Rate    │ Error Rate      │ P99 Latency         │
+│ [====] 1.2k/s   │ [==] 0.5%       │ [======] 245ms      │
+├─────────────────┴─────────────────┴─────────────────────┤
+│                   Database                               │
+│ Active Conns: 15/50  │  Pending: 2  │  Slow: 3/min      │
+├─────────────────────────────────────────────────────────┤
+│                   Redis                                  │
+│ Memory: 2.1GB  │  Connected: ✓  │  Lock Failures: 5/min │
+├─────────────────────────────────────────────────────────┤
+│                   Circuit Breakers                       │
+│ orderService: CLOSED ✓  │  paymentService: OPEN ⚠️      │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 11.5 필수 알람
 
 ```yaml
-# 알람
-alert: HighLockFailureRate
-  expr: rate(distributed_lock_total{result="failed"}[5m]) > 10
-```
-
-**해결:**
-```kotlin
-// 1. waitTime 조정
-@DistributedLock(key = "...", waitTime = 10)  // 5 → 10초
-
-// 2. 락 키 세분화
-// ❌ 전체 주문에 하나의 락
-@DistributedLock(key = "'order:create'")
-
-// ✅ 상품별로 락 분리
-@DistributedLock(key = "'order:product:' + #productId")
-```
-
-#### 재고 음수 발생 (Overselling)
-
-**탐지:**
-```sql
-SELECT id, name, stock_quantity
-FROM products
-WHERE stock_quantity < 0;
-```
-
-**해결:**
-```sql
--- DB 제약조건 추가
-ALTER TABLE products
-ADD CONSTRAINT chk_stock_positive
-CHECK (stock_quantity >= 0);
-```
-
-### 11.4 Circuit Breaker 관련 문제
-
-#### 서킷이 너무 자주 열림
-
-**탐지:**
-```
-GET /actuator/circuitbreakers
-resilience4j_circuitbreaker_state{name="orderService"} == 1  # OPEN
-```
-
-**해결:**
-```yaml
-resilience4j:
-  circuitbreaker:
-    instances:
-      orderService:
-        failure-rate-threshold: 70      # 50 → 70 (더 관대하게)
-        sliding-window-size: 20         # 10 → 20 (더 많은 샘플)
-        minimum-number-of-calls: 10     # 최소 호출 수 증가
-```
-
-#### 서킷이 열려야 할 때 안 열림
-
-**해결:**
-```yaml
-# slow-call 설정 추가
-resilience4j:
-  circuitbreaker:
-    instances:
-      paymentService:
-        slow-call-duration-threshold: 2s
-        slow-call-rate-threshold: 50
-```
-
-### 11.5 모니터링 대시보드 필수 항목
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                     System Overview                              │
-├─────────────────┬─────────────────┬─────────────────────────────┤
-│ Request Rate    │ Error Rate      │ P99 Latency                 │
-│ [====] 1.2k/s   │ [==] 0.5%       │ [======] 245ms              │
-├─────────────────┴─────────────────┴─────────────────────────────┤
-│                     Database                                     │
-├─────────────────┬─────────────────┬─────────────────────────────┤
-│ Active Conns    │ Pending Conns   │ Slow Queries                │
-│ [====] 15/50    │ [=] 2           │ [==] 3/min                  │
-├─────────────────┴─────────────────┴─────────────────────────────┤
-│                     Redis                                        │
-├─────────────────┬─────────────────┬─────────────────────────────┤
-│ Memory Usage    │ Connected       │ Lock Failures               │
-│ [======] 2.1GB  │ [✓] Yes         │ [=] 5/min                   │
-├─────────────────┴─────────────────┴─────────────────────────────┤
-│                     Circuit Breakers                             │
-├─────────────────┬─────────────────┬─────────────────────────────┤
-│ orderService    │ productService  │ paymentService              │
-│ [CLOSED] ✓      │ [CLOSED] ✓      │ [OPEN] ⚠️                   │
-└─────────────────┴─────────────────┴─────────────────────────────┘
-```
-
-### 11.6 필수 알람 설정
-
-```yaml
-# 1. 에러율 증가
 - alert: HighErrorRate
   expr: rate(http_server_requests_seconds_count{status=~"5.."}[5m]) > 0.1
 
-# 2. 응답 시간 증가
-- alert: HighLatency
-  expr: histogram_quantile(0.99, rate(http_server_requests_seconds_bucket[5m])) > 1
-
-# 3. 서킷 브레이커 OPEN
 - alert: CircuitBreakerOpen
   expr: resilience4j_circuitbreaker_state == 1
 
-# 4. 커넥션 풀 고갈 임박
 - alert: ConnectionPoolExhaustion
   expr: hikaricp_connections_pending > 5
 
-# 5. Redis 연결 실패
 - alert: RedisDown
   expr: redis_up == 0
-
-# 6. 재고 부족 상품
-- alert: LowStock
-  expr: product_stock_quantity < 10
 ```
 
-### 11.7 장애 대응 플레이북
-
-#### 장애 등급 분류
-
-| 등급 | 설명 | 대응 시간 | 예시 |
-|------|------|----------|------|
-| P1 | 서비스 전체 장애 | 즉시 | 모든 주문 실패 |
-| P2 | 주요 기능 장애 | 15분 내 | 결제 실패 |
-| P3 | 부분 기능 장애 | 1시간 내 | 특정 상품 주문 불가 |
-| P4 | 경미한 이슈 | 업무 시간 내 | 느린 응답 |
-
-#### 장애 대응 체크리스트
+### 11.6 장애 대응 체크리스트
 
 ```
-□ 1. 장애 인지 및 공유
-   - Slack/PagerDuty 알림 확인
-   - 팀 채널에 장애 공유
-
-□ 2. 영향 범위 파악
-   - 에러율, 영향 사용자 수 확인
-   - 장애 등급 판단
-
-□ 3. 원인 파악
-   - 최근 배포 이력 확인
-   - 로그 분석 (ELK)
-   - 메트릭 확인 (Grafana)
-
-□ 4. 긴급 대응
-   - 롤백 필요 여부 판단
-   - 트래픽 제한 (Rate Limit 강화)
-   - 서킷 브레이커 수동 OPEN
-
-□ 5. 복구 확인
-   - 메트릭 정상화 확인
-   - 테스트 주문 실행
-
-□ 6. 포스트모템
-   - 타임라인 정리
-   - 근본 원인 분석
-   - 재발 방지 대책 수립
+□ 1. 장애 인지 → Slack/PagerDuty 알림 확인
+□ 2. 영향 범위 파악 → 에러율, 영향 사용자 수
+□ 3. 원인 파악 → 최근 배포, 로그, 메트릭
+□ 4. 긴급 대응 → 롤백, Rate Limit, 서킷 수동 OPEN
+□ 5. 복구 확인 → 메트릭 정상화, 테스트 주문
+□ 6. 포스트모템 → 타임라인, 근본 원인, 재발 방지
 ```
 
-### 11.8 실제 장애 사례 및 해결
+### 11.7 실제 장애 사례
 
 #### 사례 1: 플래시 세일 시 락 실패 폭발
 
 ```
-상황: 오전 10시 선착순 이벤트, 1000명 동시 접속
-증상: 95% 요청이 "Lock acquisition failed"
 원인: 모든 요청이 같은 락 키 경쟁
+해결: 사용자별 락 분리 + 원자적 업데이트
+      @DistributedLock(key = "'sale:' + #productId + ':' + #userId")
 ```
 
-**해결:**
-```kotlin
-// Before: 모든 요청이 하나의 락 경쟁
-@DistributedLock(key = "'flash-sale:' + #productId")
-
-// After: 사용자별로 락 분리 + 원자적 업데이트로 보호
-@DistributedLock(key = "'flash-sale:' + #productId + ':' + #userId")
-fun participate(productId: Long, userId: Long) {
-    // 중복 참여 방지는 락으로
-    // 재고 감소는 atomic update로
-}
-```
-
-#### 사례 2: 결제 서비스 장애로 전체 주문 실패
+#### 사례 2: 결제 장애로 전체 주문 실패
 
 ```
-상황: PG사 장애 (5분)
-증상: 모든 주문 실패, 서킷은 안 열림
-원인: 타임아웃이 30초로 설정, slow-call 미설정
+원인: 타임아웃 30초, slow-call 미설정
+해결: slow-call-duration-threshold: 3s 추가, 타임아웃 5s로 단축
 ```
 
-**해결:**
-```yaml
-resilience4j:
-  circuitbreaker:
-    instances:
-      paymentService:
-        slow-call-duration-threshold: 3s  # 추가
-        slow-call-rate-threshold: 50      # 추가
-  timelimiter:
-    instances:
-      paymentService:
-        timeout-duration: 5s              # 30s → 5s
-```
-
-#### 사례 3: 새벽 배치로 인한 DB 커넥션 고갈
+#### 사례 3: 배치로 인한 커넥션 고갈
 
 ```
-상황: 새벽 3시 정산 배치 실행
-증상: 일반 API 타임아웃 발생
 원인: 배치가 커넥션 50개 중 45개 점유
+해결: API용/배치용 별도 데이터소스 분리
 ```
-
-**해결:**
-```yaml
-# 배치용 별도 데이터소스
-spring:
-  datasource:
-    api:
-      maximum-pool-size: 30
-    batch:
-      maximum-pool-size: 20  # 별도 풀
-```
-
-> **💡 실무 팁**: 장애는 반드시 발생합니다. 중요한 것은 빠르게 탐지하고, 빠르게 복구하고, 재발을 방지하는 것입니다. 모니터링과 알람 설정에 충분한 시간을 투자하세요.
 
 ---
 
 ## 요약
 
-| 패턴 | 목적 | 핵심 기능 |
-|-----|-----|----------|
-| **Distributed Lock** | 동시성 제어 | 한 번에 하나의 프로세스만 실행 |
-| **Atomic Update** | 데이터 무결성 | 조건부 업데이트로 Race Condition 방지 |
-| **Circuit Breaker** | 장애 전파 방지 | 실패율 높으면 요청 차단 |
-| **Bulkhead** | 리소스 격리 | 서비스별 동시 요청 수 제한 |
-| **Retry** | 일시적 오류 복구 | 네트워크 오류 시 자동 재시도 |
+### 동시성 제어
 
-이 모든 패턴이 함께 동작하여 **대용량 트래픽에서도 안정적인 주문 처리**를 보장합니다.
+| 문제 | 권장 해결책 | 비고 |
+|-----|------------|------|
+| **재고 과잉 판매** | **원자적 UPDATE** | `UPDATE WHERE stock >= qty` |
+| **쿠폰 중복 사용** | **원자적 UPDATE** | `UPDATE WHERE used = false` |
+| **중복 주문 (따닥)** | **멱등성 키** | 분산 락은 오버엔지니어링 |
+| **캐시 스탬피드** | **분산 락** | DB 보호 목적 |
+| **배치 중복 실행** | **분산 락** | 다중 인스턴스 환경 |
+
+### Resilience 패턴
+
+| 문제 | 해결책 | 핵심 기능 |
+|-----|--------|----------|
+| **장애 전파** | **Circuit Breaker** | 실패율 높으면 차단 |
+| **리소스 고갈** | **Bulkhead** | 동시 요청 수 제한 |
+| **일시적 오류** | **Retry** | 자동 재시도 |
+
+### 주문 요청 흐름 (권장)
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                                                              │
+│   요청 → [Rate Limiter] → [Bulkhead] → [Circuit Breaker]     │
+│            초당 제한       동시 제한      장애 차단            │
+│                              │                               │
+│                              ▼                               │
+│         [멱등성 체크] → [원자적 UPDATE] → 주문 완료            │
+│          중복 요청 방지     재고/쿠폰 보호                     │
+│                                                              │
+│   ※ 분산 락: 캐시 스탬피드, 배치, 외부 API 연동 시에만 사용     │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 핵심 메시지
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│  ✅ 원자적 UPDATE만으로 대부분의 데이터 무결성 문제 해결       │
+│                                                             │
+│  ✅ 중복 요청 방지는 멱등성 키가 더 가볍고 효과적             │
+│                                                             │
+│  ⚠️ 분산 락은 특수한 경우에만 필요:                          │
+│     - 캐시 스탬피드 방지                                     │
+│     - 배치 작업 중복 실행 방지                               │
+│     - 외부 API 직렬화 제약                                   │
+│     - 장시간 리소스 선점 (좌석 예약 등)                       │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+> **실무 팁**: 단순한 시스템에서는 원자적 UPDATE + 멱등성 키로 시작하고, 필요할 때만 분산 락을 도입하세요.
+
+---
+
+## FAQ (자주 묻는 질문)
+
+### Q1. 분산 락 없이 재고 보호가 정말 되나요?
+
+**A**: 네, 원자적 UPDATE만으로 충분합니다.
+
+```sql
+UPDATE products SET stock = stock - 1 WHERE id = 1 AND stock >= 1
+```
+
+DB의 Row Lock이 동시성을 처리합니다. 분산 락은 재고 보호가 아닌 다른 목적(캐시, 배치 등)에 사용됩니다.
+
+---
+
+### Q2. 원자적 UPDATE가 실패하면 어떻게 되나요?
+
+**A**: `affected rows = 0`이 반환되고, 애플리케이션에서 예외를 던집니다.
+
+```kotlin
+val updated = productRepository.decreaseStockAtomically(productId, quantity)
+if (updated == 0) throw BusinessException(ErrorCode.INSUFFICIENT_STOCK)
+```
+
+---
+
+### Q3. 여러 상품을 동시에 주문할 때 데드락이 발생하나요?
+
+**A**: 상품 ID 순으로 정렬하여 UPDATE하면 데드락을 방지할 수 있습니다.
+
+```kotlin
+val items = orderItems.sortedBy { it.productId }  // 항상 같은 순서로 락 획득
+items.forEach { productRepository.decreaseStockAtomically(it.productId, it.quantity) }
+```
+
+---
+
+### Q4. 멱등성 키는 누가 생성하나요?
+
+**A**: 일반적으로 **클라이언트**가 생성합니다. 서버에서 자동 생성하면 중복 요청을 구분할 수 없습니다.
+
+```javascript
+// 클라이언트
+headers: { 'Idempotency-Key': crypto.randomUUID() }
+```
+
+버튼 클릭 시 키를 생성하고, 재시도 시 동일한 키를 사용합니다.
+
+---
+
+### Q5. 캐시 스탬피드가 뭔가요?
+
+**A**: 캐시가 만료되는 순간 수천 개의 요청이 동시에 DB를 조회하는 현상입니다.
+
+```
+캐시 만료 → 1000개 요청이 캐시 미스 → 1000개 DB 쿼리 → DB 과부하
+```
+
+**해결**: 분산 락으로 1개 요청만 DB 조회, 나머지는 대기 후 캐시에서 읽기
+
+---
+
+### Q6. Circuit Breaker가 열리면 어떻게 되나요?
+
+**A**: 모든 요청이 즉시 실패하고 fallback이 실행됩니다 (설정된 경우).
+
+```kotlin
+@CircuitBreaker(name = "orderService", fallbackMethod = "createOrderFallback")
+fun createOrder(...) { ... }
+
+fun createOrderFallback(request: OrderRequest, ex: Exception): OrderResponse {
+    throw BusinessException(ErrorCode.SERVICE_TEMPORARILY_UNAVAILABLE)
+}
+```
+
+---
+
+### Q7. 비즈니스 예외도 Circuit Breaker에 카운트되나요?
+
+**A**: `ignore-exceptions`에 등록하면 카운트되지 않습니다.
+
+```yaml
+ignore-exceptions:
+  - com.example.marketplace.common.BusinessException
+```
+
+재고 부족(`INSUFFICIENT_STOCK`)은 정상적인 비즈니스 흐름이므로 서킷을 열면 안 됩니다.
+
+---
+
+### Q8. 언제 분산 락을 써야 하나요?
+
+**A**: 아래 경우에만 사용하세요:
+
+| 사용 O | 사용 X |
+|--------|--------|
+| 캐시 스탬피드 방지 | 재고 차감 |
+| 배치 작업 중복 방지 | 쿠폰 사용 |
+| 외부 API 직렬화 | 중복 주문 방지 |
+| 좌석/리소스 장시간 선점 | 일반적인 CRUD |
+
+**판단 기준**: "원자적 UPDATE나 멱등성 키로 해결 가능한가?" → 가능하면 분산 락 불필요
