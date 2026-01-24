@@ -68,5 +68,16 @@ class JwtTokenProvider(
         return claims.subject.toLong()
     }
 
+    fun getTokenRemainingTimeMs(token: String): Long {
+        return try {
+            val claims = Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(token).body
+            val expiration = claims.expiration.time
+            val remaining = expiration - System.currentTimeMillis()
+            if (remaining > 0) remaining else 0
+        } catch (ex: JwtException) {
+            0
+        }
+    }
+
     fun getKey(): Key = key
 }

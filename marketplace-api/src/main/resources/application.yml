@@ -11,6 +11,50 @@ spring:
       max-file-size: 10MB
       max-request-size: 50MB
 
+server:
+  shutdown: graceful
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      orderService:
+        register-health-indicator: true
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+        slow-call-duration-threshold: 2s
+        slow-call-rate-threshold: 50
+      productService:
+        register-health-indicator: true
+        sliding-window-size: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+  ratelimiter:
+    instances:
+      default:
+        limit-for-period: 100
+        limit-refresh-period: 1s
+        timeout-duration: 0s
+      orderCreation:
+        limit-for-period: 10
+        limit-refresh-period: 1s
+        timeout-duration: 0s
+  bulkhead:
+    instances:
+      orderService:
+        max-concurrent-calls: 20
+        max-wait-duration: 0s
+  retry:
+    instances:
+      orderService:
+        max-attempts: 3
+        wait-duration: 500ms
+        retry-exceptions:
+          - java.io.IOException
+          - java.util.concurrent.TimeoutException
+
 springdoc:
   swagger-ui:
     path: /swagger-ui.html

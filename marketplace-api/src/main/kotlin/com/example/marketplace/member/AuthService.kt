@@ -7,6 +7,7 @@ import com.example.marketplace.member.dto.RefreshRequest
 import com.example.marketplace.member.dto.SignupRequest
 import com.example.marketplace.member.dto.TokenResponse
 import com.example.marketplace.security.JwtTokenProvider
+import com.example.marketplace.security.TokenBlacklistService
 import org.springframework.security.crypto.password.PasswordEncoder
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -16,7 +17,8 @@ import org.springframework.transaction.annotation.Transactional
 class AuthService(
     private val memberJpaRepository: MemberJpaRepository,
     private val passwordEncoder: PasswordEncoder,
-    private val jwtTokenProvider: JwtTokenProvider
+    private val jwtTokenProvider: JwtTokenProvider,
+    private val tokenBlacklistService: TokenBlacklistService
 ) {
 
     @Transactional
@@ -68,5 +70,19 @@ class AuthService(
         val refreshToken = jwtTokenProvider.createRefreshToken(member.id!!, member.email, member.role.name)
 
         return TokenResponse(accessToken, refreshToken, jwtTokenProvider.accessTokenValidityInSeconds)
+    }
+
+    fun logout(accessToken: String, refreshToken: String?) {
+        val accessTokenExpiration = jwtTokenProvider.getTokenRemainingTimeMs(accessToken)
+        if (accessTokenExpiration > 0) {
+            tokenBlacklistService.blacklist(accessToken, accessTokenExpiration)
+        }
+
+        refreshToken?.let {
+            val refreshTokenExpiration = jwtTokenProvider.getTokenRemainingTimeMs(it)
+            if (refreshTokenExpiration > 0) {
+                tokenBlacklistService.blacklist(it, refreshTokenExpiration)
+            }
+        }
     }
 }

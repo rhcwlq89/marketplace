@@ -76,8 +76,8 @@ class OrderServiceTest {
         )
 
         every { memberJpaRepository.findById(buyer.id!!) } returns Optional.of(buyer)
-        every { productJpaRepository.findByIdWithLock(product.id!!) } returns Optional.of(product)
-        every { productJpaRepository.save(any()) } answers { firstArg() }
+        every { productJpaRepository.findById(product.id!!) } returns Optional.of(product)
+        every { productJpaRepository.decreaseStockAtomically(product.id!!, 2) } returns 1
         every { orderJpaRepository.save(any()) } answers {
             val order = firstArg<Order>()
             order.id = 1L
@@ -144,14 +144,13 @@ class OrderServiceTest {
         }
 
         every { orderJpaRepository.findById(order.id!!) } returns Optional.of(order)
-        every { productJpaRepository.findByIdWithLock(product.id!!) } returns Optional.of(product)
-        every { productJpaRepository.save(any()) } answers { firstArg() }
+        every { productJpaRepository.restoreStockAtomically(product.id!!, 2) } returns 1
         every { orderJpaRepository.save(any()) } answers { firstArg() }
 
         val response = orderService.cancelOrder(buyer.id!!, order.id!!)
 
         assertEquals("CANCELLED", response.status)
-        verify { productJpaRepository.save(match { it.stockQuantity == 100 }) }
+        verify { productJpaRepository.restoreStockAtomically(product.id!!, 2) }
     }
 
     @Test

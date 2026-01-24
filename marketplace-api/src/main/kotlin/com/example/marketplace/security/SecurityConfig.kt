@@ -13,7 +13,10 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 
 @Configuration
 @EnableMethodSecurity
-class SecurityConfig(private val jwtTokenProvider: JwtTokenProvider) {
+class SecurityConfig(
+    private val jwtTokenProvider: JwtTokenProvider,
+    private val tokenBlacklistService: TokenBlacklistService
+) {
 
     @Bean
     fun passwordEncoder(): PasswordEncoder = BCryptPasswordEncoder()
@@ -29,6 +32,8 @@ class SecurityConfig(private val jwtTokenProvider: JwtTokenProvider) {
                     // Public product endpoints
                     .requestMatchers(HttpMethod.GET, "/api/v1/products/**").permitAll()
                     .requestMatchers(HttpMethod.GET, "/api/v1/categories/**").permitAll()
+                    // Actuator endpoints
+                    .requestMatchers("/actuator/**").permitAll()
                     // Swagger UI
                     .requestMatchers(
                         "/swagger-ui/**",
@@ -43,7 +48,10 @@ class SecurityConfig(private val jwtTokenProvider: JwtTokenProvider) {
                     .anyRequest().authenticated()
             }
 
-        http.addFilterBefore(JwtAuthenticationFilter(jwtTokenProvider), UsernamePasswordAuthenticationFilter::class.java)
+        http.addFilterBefore(
+            JwtAuthenticationFilter(jwtTokenProvider, tokenBlacklistService),
+            UsernamePasswordAuthenticationFilter::class.java
+        )
 
         // H2 Console
         http.headers { it.frameOptions { fo -> fo.disable() } }

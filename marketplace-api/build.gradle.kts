@@ -3,6 +3,8 @@ plugins {
     id("io.spring.dependency-management")
 }
 
+val resilience4jVersion = "2.2.0"
+
 dependencies {
     implementation(project(":marketplace-common"))
     implementation(project(":marketplace-domain"))
@@ -19,6 +21,23 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-cache")
     implementation("com.github.ben-manes.caffeine:caffeine:3.1.8")
 
+    // Redis
+    implementation("org.springframework.boot:spring-boot-starter-data-redis")
+    implementation("org.redisson:redisson-spring-boot-starter:3.27.0")
+
+    // Kafka
+    implementation("org.springframework.kafka:spring-kafka")
+
+    // Resilience4j
+    implementation("io.github.resilience4j:resilience4j-spring-boot3:$resilience4jVersion")
+    implementation("io.github.resilience4j:resilience4j-circuitbreaker:$resilience4jVersion")
+    implementation("io.github.resilience4j:resilience4j-ratelimiter:$resilience4jVersion")
+    implementation("io.github.resilience4j:resilience4j-bulkhead:$resilience4jVersion")
+    implementation("io.github.resilience4j:resilience4j-retry:$resilience4jVersion")
+
+    // Monitoring
+    implementation("io.micrometer:micrometer-registry-prometheus")
+
     // JWT
     implementation("io.jsonwebtoken:jjwt-api:0.11.5")
     runtimeOnly("io.jsonwebtoken:jjwt-impl:0.11.5")
@@ -33,4 +52,5 @@ dependencies {
 
     // Test
     testImplementation("org.springframework.security:spring-security-test")
+    testImplementation("org.springframework.kafka:spring-kafka-test")
 }

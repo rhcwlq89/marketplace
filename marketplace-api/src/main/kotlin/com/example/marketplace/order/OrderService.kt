@@ -1,6 +1,7 @@
 package com.example.marketplace.order
 
 import com.example.marketplace.common.BusinessException
+import com.example.marketplace.common.DistributedLock
 import com.example.marketplace.common.ErrorCode
 import com.example.marketplace.member.MemberJpaRepository
 import com.example.marketplace.order.dto.CreateOrderRequest
@@ -9,6 +10,10 @@ import com.example.marketplace.order.dto.UpdateOrderStatusRequest
 import com.example.marketplace.order.event.OrderCreatedEvent
 import com.example.marketplace.order.event.OrderStatusChangedEvent
 import com.example.marketplace.product.ProductJpaRepository
+import io.github.resilience4j.bulkhead.annotation.Bulkhead
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker
+import io.github.resilience4j.retry.annotation.Retry
+import org.slf4j.LoggerFactory
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
@@ -23,8 +28,13 @@ class OrderService(
     private val memberJpaRepository: MemberJpaRepository,
     private val eventPublisher: ApplicationEventPublisher
 ) {
+    private val log = LoggerFactory.getLogger(javaClass)
 
     @Transactional
+    @DistributedLock(key = "'order:create:' + #buyerId", waitTime = 5, leaseTime = 30)
+    @CircuitBreaker(name = "orderService", fallbackMethod = "createOrderFallback")
+    @Bulkhead(name = "orderService")
+    @Retry(name = "orderService")
     fun createOrder(buyerId: Long, req: CreateOrderRequest): OrderResponse {
         if (req.orderItems.isEmpty()) {
             throw BusinessException(ErrorCode.EMPTY_ORDER_ITEMS)
@@ -45,29 +55,40 @@ class OrderService(
         )
 
         val sellerIds = mutableSetOf<Long>()
+        val decreasedProducts = mutableListOf<Pair<Long, Int>>()
 
-        req.orderItems.forEach { itemReq ->
-            val product = productJpaRepository.findByIdWithLock(itemReq.productId)
-                .orElseThrow { BusinessException(ErrorCode.PRODUCT_NOT_FOUND) }
+        try {
+            req.orderItems.forEach { itemReq ->
+                val product = productJpaRepository.findById(itemReq.productId)
+                    .orElseThrow { BusinessException(ErrorCode.PRODUCT_NOT_FOUND) }
 
-            product.decreaseStock(itemReq.quantity)
-            productJpaRepository.save(product)
+                val updated = productJpaRepository.decreaseStockAtomically(itemReq.productId, itemReq.quantity)
+                if (updated == 0) {
+                    log.warn("Failed to decrease stock for product ${itemReq.productId}")
+                    throw BusinessException(ErrorCode.INSUFFICIENT_STOCK)
+                }
+                decreasedProducts.add(itemReq.productId to itemReq.quantity)
 
-            val orderItem = OrderItem(
-                product = product,
-                seller = product.seller,
-                productName = product.name,
-                productPrice = product.price,
-                quantity = itemReq.quantity,
-                subtotal = product.price.multiply(itemReq.quantity.toBigDecimal())
-            )
-            order.addItem(orderItem)
-            sellerIds.add(product.seller.id!!)
+                val orderItem = OrderItem(
+                    product = product,
+                    seller = product.seller,
+                    productName = product.name,
+                    productPrice = product.price,
+                    quantity = itemReq.quantity,
+                    subtotal = product.price.multiply(itemReq.quantity.toBigDecimal())
+                )
+                order.addItem(orderItem)
+                sellerIds.add(product.seller.id!!)
+            }
+        } catch (e: BusinessException) {
+            decreasedProducts.forEach { (productId, quantity) ->
+                productJpaRepository.restoreStockAtomically(productId, quantity)
+            }
+            throw e
         }
 
         val savedOrder = orderJpaRepository.save(order)
 
-        // Publish event for each seller
         sellerIds.forEach { sellerId ->
             eventPublisher.publishEvent(OrderCreatedEvent(savedOrder.id!!, sellerId))
         }
@@ -95,6 +116,7 @@ class OrderService(
     }
 
     @Transactional
+    @DistributedLock(key = "'order:cancel:' + #orderId", waitTime = 5, leaseTime = 30)
     fun cancelOrder(buyerId: Long, orderId: Long): OrderResponse {
         val order = orderJpaRepository.findById(orderId)
             .orElseThrow { BusinessException(ErrorCode.ORDER_NOT_FOUND) }
@@ -107,18 +129,13 @@ class OrderService(
             throw BusinessException(ErrorCode.CANNOT_CANCEL_ORDER)
         }
 
-        // Restore stock
         order.orderItems.forEach { item ->
-            val product = productJpaRepository.findByIdWithLock(item.product.id!!)
-                .orElseThrow { BusinessException(ErrorCode.PRODUCT_NOT_FOUND) }
-            product.restoreStock(item.quantity)
-            productJpaRepository.save(product)
+            productJpaRepository.restoreStockAtomically(item.product.id!!, item.quantity)
         }
 
         order.cancel()
         val savedOrder = orderJpaRepository.save(order)
 
-        // Publish event
         order.orderItems.map { it.seller.id!! }.toSet().forEach { sellerId ->
             eventPublisher.publishEvent(OrderStatusChangedEvent(savedOrder.id!!, sellerId, buyerId, "CANCELLED"))
         }
@@ -156,5 +173,10 @@ class OrderService(
         )
 
         return OrderResponse.from(savedOrder)
+    }
+
+    private fun createOrderFallback(buyerId: Long, req: CreateOrderRequest, ex: Throwable): OrderResponse {
+        log.error("Circuit breaker fallback triggered for createOrder. Buyer: $buyerId, Error: ${ex.message}")
+        throw BusinessException(ErrorCode.SERVICE_UNAVAILABLE)
     }
 }

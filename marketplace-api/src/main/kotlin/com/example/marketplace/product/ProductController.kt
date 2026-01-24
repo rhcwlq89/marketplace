@@ -1,6 +1,7 @@
 package com.example.marketplace.product
 
 import com.example.marketplace.common.CommonResponse
+import com.example.marketplace.common.CursorPageResponse
 import com.example.marketplace.product.dto.*
 import io.swagger.v3.oas.annotations.Operation
 import io.swagger.v3.oas.annotations.tags.Tag
@@ -89,5 +90,21 @@ class ProductController(private val productService: ProductService) {
     @GetMapping("/popular")
     fun getPopularProducts(): CommonResponse<List<ProductResponse>> {
         return CommonResponse.success(productService.getPopularProducts())
+    }
+
+    @Operation(summary = "상품 목록 조회 (커서 기반 페이지네이션)")
+    @GetMapping("/cursor")
+    fun searchProductsWithCursor(
+        @RequestParam(required = false) keyword: String?,
+        @RequestParam(required = false) categoryId: Long?,
+        @RequestParam(required = false) minPrice: BigDecimal?,
+        @RequestParam(required = false) maxPrice: BigDecimal?,
+        @RequestParam(required = false) status: String?,
+        @RequestParam(required = false) sellerId: Long?,
+        @RequestParam(required = false) cursor: String?,
+        @RequestParam(defaultValue = "20") limit: Int
+    ): CommonResponse<CursorPageResponse<ProductResponse>> {
+        val req = ProductSearchRequest(keyword, categoryId, minPrice, maxPrice, status, sellerId)
+        return CommonResponse.success(productService.searchProductsWithCursor(req, cursor, limit))
     }
 }

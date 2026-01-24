@@ -16,10 +16,14 @@ COPY . .
 RUN gradle :marketplace-api:bootJar --no-daemon -x test
 
 # Runtime
-FROM eclipse-temurin:17-jre-alpine
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 
-RUN addgroup -g 1001 -S appgroup && adduser -u 1001 -S appuser -G appgroup
+RUN groupadd -g 1001 appgroup && useradd -u 1001 -g appgroup appuser
+
+# Create uploads directory with proper permissions
+RUN mkdir -p /app/uploads && chown -R appuser:appgroup /app
+
 USER appuser
 
 COPY --from=builder /app/marketplace-api/build/libs/*.jar app.jar

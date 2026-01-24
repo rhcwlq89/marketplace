@@ -2,6 +2,7 @@ package com.example.marketplace.member
 
 import com.example.marketplace.common.CommonResponse
 import com.example.marketplace.member.dto.LoginRequest
+import com.example.marketplace.member.dto.LogoutRequest
 import com.example.marketplace.member.dto.RefreshRequest
 import com.example.marketplace.member.dto.SignupRequest
 import com.example.marketplace.member.dto.TokenResponse
@@ -32,5 +33,12 @@ class AuthController(private val authService: AuthService) {
     @PostMapping("/refresh")
     fun refresh(@Valid @RequestBody req: RefreshRequest): CommonResponse<TokenResponse> {
         return CommonResponse.success(authService.refresh(req))
+    }
+
+    @Operation(summary = "로그아웃")
+    @PostMapping("/logout")
+    fun logout(@Valid @RequestBody req: LogoutRequest): CommonResponse<Unit> {
+        authService.logout(req.accessToken, req.refreshToken)
+        return CommonResponse.success()
     }
 }

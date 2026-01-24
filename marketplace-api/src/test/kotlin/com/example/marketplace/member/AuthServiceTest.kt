@@ -5,6 +5,7 @@ import com.example.marketplace.common.ErrorCode
 import com.example.marketplace.member.dto.LoginRequest
 import com.example.marketplace.member.dto.SignupRequest
 import com.example.marketplace.security.JwtTokenProvider
+import com.example.marketplace.security.TokenBlacklistService
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -21,13 +22,15 @@ class AuthServiceTest {
     private lateinit var memberJpaRepository: MemberJpaRepository
     private lateinit var passwordEncoder: PasswordEncoder
     private lateinit var jwtTokenProvider: JwtTokenProvider
+    private lateinit var tokenBlacklistService: TokenBlacklistService
 
     @BeforeEach
     fun setup() {
         memberJpaRepository = mockk()
         passwordEncoder = mockk()
         jwtTokenProvider = mockk()
-        authService = AuthService(memberJpaRepository, passwordEncoder, jwtTokenProvider)
+        tokenBlacklistService = mockk(relaxed = true)
+        authService = AuthService(memberJpaRepository, passwordEncoder, jwtTokenProvider, tokenBlacklistService)
     }
 
     @Test

@@ -2,9 +2,12 @@ package com.example.marketplace.product
 
 import com.example.marketplace.category.CategoryJpaRepository
 import com.example.marketplace.common.BusinessException
+import com.example.marketplace.common.CursorPageResponse
 import com.example.marketplace.common.ErrorCode
 import com.example.marketplace.member.MemberJpaRepository
 import com.example.marketplace.product.dto.*
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker
+import org.slf4j.LoggerFactory
 import org.springframework.cache.annotation.CacheEvict
 import org.springframework.cache.annotation.Cacheable
 import org.springframework.data.domain.Page
@@ -25,6 +28,7 @@ class ProductService(
     private val memberJpaRepository: MemberJpaRepository,
     private val categoryJpaRepository: CategoryJpaRepository
 ) {
+    private val log = LoggerFactory.getLogger(javaClass)
     private val uploadDir: Path = Paths.get("uploads/products")
     private val allowedExtensions = listOf("jpg", "jpeg", "png", "gif")
     private val maxFileSize = 10 * 1024 * 1024L // 10MB
@@ -62,6 +66,7 @@ class ProductService(
         return ProductResponse.from(product)
     }
 
+    @CircuitBreaker(name = "productService", fallbackMethod = "searchProductsFallback")
     fun searchProducts(req: ProductSearchRequest, pageable: Pageable): Page<ProductResponse> {
         val status = req.status?.let { ProductStatus.valueOf(it) }
         return productJpaRepository.search(
@@ -158,5 +163,40 @@ class ProductService(
     fun getMyProducts(sellerId: Long, pageable: Pageable): Page<ProductResponse> {
         return productJpaRepository.findBySellerId(sellerId, pageable)
             .map { ProductResponse.from(it) }
+    }
+
+    fun searchProductsWithCursor(
+        req: ProductSearchRequest,
+        cursor: String?,
+        limit: Int
+    ): CursorPageResponse<ProductResponse> {
+        val (cursorTimestamp, cursorId) = cursor?.let { CursorPageResponse.decodeCursor(it) }
+            ?: Pair(null, null)
+
+        val status = req.status?.let { ProductStatus.valueOf(it) }
+        val products = productJpaRepository.searchWithCursor(
+            keyword = req.keyword,
+            categoryId = req.categoryId,
+            minPrice = req.minPrice,
+            maxPrice = req.maxPrice,
+            status = status,
+            sellerId = req.sellerId,
+            cursor = cursorTimestamp,
+            cursorId = cursorId,
+            limit = limit + 1
+        )
+
+        return CursorPageResponse.of(
+            content = products.map { ProductResponse.from(it) },
+            limit = limit
+        ) { response ->
+            val product = products.find { it.id == response.id }!!
+            product.createdAt to product.id!!
+        }
+    }
+
+    private fun searchProductsFallback(req: ProductSearchRequest, pageable: Pageable, ex: Throwable): Page<ProductResponse> {
+        log.error("Circuit breaker fallback triggered for searchProducts. Error: ${ex.message}")
+        throw BusinessException(ErrorCode.SERVICE_UNAVAILABLE)
     }
 }
