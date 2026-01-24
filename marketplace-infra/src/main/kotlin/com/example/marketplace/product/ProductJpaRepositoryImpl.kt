@@ -8,6 +8,7 @@ import jakarta.persistence.PersistenceContext
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.support.PageableExecutionUtils
+import org.springframework.transaction.annotation.Transactional
 import java.math.BigDecimal
 import java.time.LocalDateTime
 import java.util.*
@@ -21,6 +22,7 @@ class ProductJpaRepositoryImpl(
 
     private val product = QProduct.product
 
+    @Transactional
     override fun findByIdWithLock(id: Long): Optional<Product> {
         val result = queryFactory
             .selectFrom(product)
@@ -31,6 +33,7 @@ class ProductJpaRepositoryImpl(
         return Optional.ofNullable(result)
     }
 
+    @Transactional(readOnly = true)
     override fun search(
         keyword: String?,
         categoryId: Long?,
@@ -74,6 +77,7 @@ class ProductJpaRepositoryImpl(
         }
     }
 
+    @Transactional
     override fun decreaseStockAtomically(productId: Long, quantity: Int): Int {
         val updateCount = entityManager.createQuery(
             """
@@ -95,6 +99,7 @@ class ProductJpaRepositoryImpl(
         return updateCount
     }
 
+    @Transactional
     override fun restoreStockAtomically(productId: Long, quantity: Int): Int {
         val updateCount = entityManager.createQuery(
             """
@@ -113,6 +118,7 @@ class ProductJpaRepositoryImpl(
         return updateCount
     }
 
+    @Transactional(readOnly = true)
     override fun searchWithCursor(
         keyword: String?,
         categoryId: Long?,

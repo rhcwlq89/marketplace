@@ -4,6 +4,7 @@ import com.querydsl.jpa.impl.JPAQueryFactory
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.support.PageableExecutionUtils
+import org.springframework.transaction.annotation.Transactional
 
 class OrderJpaRepositoryImpl(
     private val queryFactory: JPAQueryFactory
@@ -12,6 +13,7 @@ class OrderJpaRepositoryImpl(
     private val order = QOrder.order
     private val orderItem = QOrderItem.orderItem
 
+    @Transactional(readOnly = true)
     override fun findBySellerId(sellerId: Long, pageable: Pageable): Page<Order> {
         val content = queryFactory
             .selectDistinct(order)
