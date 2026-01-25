@@ -104,7 +104,49 @@ docker-compose down -v
 
 ---
 
-### 3. 부분 인프라 실행 (개발용)
+### 3. Kubernetes (k3d) 실행
+
+k3d 클러스터에서 전체 인프라를 실행합니다.
+
+#### 사전 요구사항
+- Docker
+- k3d (`brew install k3d`)
+- kubectl (`brew install kubectl`)
+
+#### 배포 실행
+```bash
+# 배포 스크립트 실행 (클러스터 생성 + 빌드 + 배포)
+./k8s/deploy.sh
+
+# Pod 상태 확인
+kubectl get pods -n marketplace
+
+# 로그 확인
+kubectl logs -f deployment/marketplace-app -n marketplace
+```
+
+#### 접속 정보
+| 서비스 | URL | 설명 |
+|--------|-----|------|
+| App | http://localhost:8080 | 마켓플레이스 API |
+| Prometheus | http://localhost:9090 | 메트릭 수집 |
+| Grafana | http://localhost:3000 | 대시보드 (admin/admin123) |
+
+#### 클러스터 관리
+```bash
+# 클러스터 중지
+k3d cluster stop marketplace
+
+# 클러스터 시작
+k3d cluster start marketplace
+
+# 클러스터 삭제
+k3d cluster delete marketplace
+```
+
+---
+
+### 4. 부분 인프라 실행 (개발용)
 
 애플리케이션은 로컬에서 실행하고, 인프라만 Docker로 실행합니다.
 
@@ -121,7 +163,7 @@ docker-compose ps
 
 ---
 
-### 4. 모니터링 대시보드
+### 5. 모니터링 대시보드
 
 ```bash
 # Prometheus UI
