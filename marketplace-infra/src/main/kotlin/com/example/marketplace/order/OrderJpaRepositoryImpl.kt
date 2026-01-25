@@ -4,8 +4,10 @@ import com.querydsl.jpa.impl.JPAQueryFactory
 import org.springframework.data.domain.Page
 import org.springframework.data.domain.Pageable
 import org.springframework.data.support.PageableExecutionUtils
+import org.springframework.stereotype.Repository
 import org.springframework.transaction.annotation.Transactional
 
+@Repository
 class OrderJpaRepositoryImpl(
     private val queryFactory: JPAQueryFactory
 ) : OrderJpaRepositoryCustom {
