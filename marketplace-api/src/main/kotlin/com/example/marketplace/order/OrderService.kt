@@ -9,6 +9,7 @@ import com.example.marketplace.order.dto.OrderResponse
 import com.example.marketplace.order.dto.UpdateOrderStatusRequest
 import com.example.marketplace.order.event.OrderCreatedEvent
 import com.example.marketplace.order.event.OrderStatusChangedEvent
+import com.example.marketplace.outbox.OutboxEventService
 import com.example.marketplace.product.ProductJpaRepository
 import io.github.resilience4j.bulkhead.annotation.Bulkhead
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker
@@ -26,7 +27,8 @@ class OrderService(
     private val orderJpaRepository: OrderJpaRepository,
     private val productJpaRepository: ProductJpaRepository,
     private val memberJpaRepository: MemberJpaRepository,
-    private val eventPublisher: ApplicationEventPublisher
+    private val eventPublisher: ApplicationEventPublisher,
+    private val outboxEventService: OutboxEventService
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -89,9 +91,24 @@ class OrderService(
 
         val savedOrder = orderJpaRepository.save(order)
 
+        // 로컬 이벤트 발행 (동기 처리용)
         sellerIds.forEach { sellerId ->
             eventPublisher.publishEvent(OrderCreatedEvent(savedOrder.id!!, sellerId))
         }
+
+        // Outbox에 저장 (Kafka로 비동기 발행)
+        outboxEventService.saveEvent(
+            aggregateType = "Order",
+            aggregateId = savedOrder.id.toString(),
+            eventType = "OrderCreated",
+            payload = mapOf(
+                "orderId" to savedOrder.id,
+                "buyerId" to buyerId,
+                "sellerIds" to sellerIds.toList(),
+                "totalAmount" to savedOrder.totalAmount,
+                "orderNumber" to savedOrder.orderNumber
+            )
+        )
 
         return OrderResponse.from(savedOrder)
     }
@@ -136,9 +153,26 @@ class OrderService(
         order.cancel()
         val savedOrder = orderJpaRepository.save(order)
 
-        order.orderItems.map { it.seller.id!! }.toSet().forEach { sellerId ->
+        val sellerIds = order.orderItems.map { it.seller.id!! }.toSet()
+
+        // 로컬 이벤트 발행
+        sellerIds.forEach { sellerId ->
             eventPublisher.publishEvent(OrderStatusChangedEvent(savedOrder.id!!, sellerId, buyerId, "CANCELLED"))
         }
+
+        // Outbox에 저장 (Kafka로 비동기 발행)
+        outboxEventService.saveEvent(
+            aggregateType = "Order",
+            aggregateId = savedOrder.id.toString(),
+            eventType = "OrderStatusChanged",
+            payload = mapOf(
+                "orderId" to savedOrder.id,
+                "buyerId" to buyerId,
+                "sellerIds" to sellerIds.toList(),
+                "status" to "CANCELLED",
+                "orderNumber" to savedOrder.orderNumber
+            )
+        )
 
         return OrderResponse.from(savedOrder)
     }
@@ -167,9 +201,23 @@ class OrderService(
         order.updateStatus(newStatus)
         val savedOrder = orderJpaRepository.save(order)
 
-        // Publish event to buyer
+        // 로컬 이벤트 발행
         eventPublisher.publishEvent(
             OrderStatusChangedEvent(savedOrder.id!!, sellerId, order.buyer.id!!, newStatus.name)
+        )
+
+        // Outbox에 저장 (Kafka로 비동기 발행)
+        outboxEventService.saveEvent(
+            aggregateType = "Order",
+            aggregateId = savedOrder.id.toString(),
+            eventType = "OrderStatusChanged",
+            payload = mapOf(
+                "orderId" to savedOrder.id,
+                "buyerId" to order.buyer.id,
+                "sellerId" to sellerId,
+                "status" to newStatus.name,
+                "orderNumber" to savedOrder.orderNumber
+            )
         )
 
         return OrderResponse.from(savedOrder)

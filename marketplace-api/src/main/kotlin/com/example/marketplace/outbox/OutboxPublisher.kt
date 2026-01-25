@@ -10,6 +10,15 @@ import org.springframework.stereotype.Component
 import org.springframework.transaction.annotation.Transactional
 import java.time.LocalDateTime
 
+/**
+ * Outbox 이벤트 저장 인터페이스
+ * - docker/prod: Kafka로 발행될 이벤트를 DB에 저장
+ * - local: 로깅만 수행 (No-op)
+ */
+interface OutboxEventService {
+    fun saveEvent(aggregateType: String, aggregateId: String, eventType: String, payload: Any)
+}
+
 @Component
 @Profile("docker", "prod")
 class OutboxPublisher(
@@ -73,10 +82,10 @@ class OutboxPublisher(
 class OutboxService(
     private val outboxJpaRepository: OutboxJpaRepository,
     private val objectMapper: ObjectMapper
-) {
+) : OutboxEventService {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    fun saveEvent(aggregateType: String, aggregateId: String, eventType: String, payload: Any) {
+    override fun saveEvent(aggregateType: String, aggregateId: String, eventType: String, payload: Any) {
         val event = OutboxEvent(
             aggregateType = aggregateType,
             aggregateId = aggregateId,
@@ -90,10 +99,10 @@ class OutboxService(
 
 @Component
 @Profile("local")
-class NoOpOutboxService {
+class NoOpOutboxService : OutboxEventService {
     private val log = LoggerFactory.getLogger(javaClass)
 
-    fun saveEvent(aggregateType: String, aggregateId: String, eventType: String, payload: Any) {
+    override fun saveEvent(aggregateType: String, aggregateId: String, eventType: String, payload: Any) {
         log.debug("NoOp outbox service - event would be saved: $eventType for $aggregateType:$aggregateId")
     }
 }

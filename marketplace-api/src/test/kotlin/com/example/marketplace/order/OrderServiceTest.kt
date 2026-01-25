@@ -8,6 +8,7 @@ import com.example.marketplace.member.Role
 import com.example.marketplace.order.dto.CreateOrderRequest
 import com.example.marketplace.order.dto.OrderItemRequest
 import com.example.marketplace.order.dto.ShippingAddressRequest
+import com.example.marketplace.outbox.OutboxEventService
 import com.example.marketplace.product.Product
 import com.example.marketplace.product.ProductJpaRepository
 import com.example.marketplace.product.ProductStatus
@@ -29,6 +30,7 @@ class OrderServiceTest {
     private lateinit var productJpaRepository: ProductJpaRepository
     private lateinit var memberJpaRepository: MemberJpaRepository
     private lateinit var eventPublisher: ApplicationEventPublisher
+    private lateinit var outboxEventService: OutboxEventService
 
     private val buyer = Member(
         id = 1L,
@@ -51,7 +53,8 @@ class OrderServiceTest {
         productJpaRepository = mockk()
         memberJpaRepository = mockk()
         eventPublisher = mockk(relaxed = true)
-        orderService = OrderService(orderJpaRepository, productJpaRepository, memberJpaRepository, eventPublisher)
+        outboxEventService = mockk(relaxed = true)
+        orderService = OrderService(orderJpaRepository, productJpaRepository, memberJpaRepository, eventPublisher, outboxEventService)
     }
 
     @Test

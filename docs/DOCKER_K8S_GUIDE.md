@@ -39,8 +39,12 @@
 
 ```dockerfile
 # ===== 1단계: 빌드 스테이지 =====
-FROM gradle:8.5-jdk17 AS builder    # Gradle + JDK 17 이미지를 기반으로
-WORKDIR /app                         # 작업 디렉토리 설정
+# Gradle + JDK 17 이미지를 기반으로
+FROM gradle:8.5-jdk17 AS builder    
+
+# 작업 디렉토리 설정
+WORKDIR /app                         
+
 
 # Gradle 파일 먼저 복사 (의존성 캐싱용)
 COPY build.gradle.kts settings.gradle.kts ./
@@ -50,11 +54,13 @@ COPY marketplace-common/build.gradle.kts ./marketplace-common/
 
 RUN gradle dependencies --no-daemon || true    # 의존성 다운로드 (캐시됨)
 
-COPY . .                                        # 소스코드 복사
+# 소스코드 복사
+COPY . .                                        
 RUN gradle :marketplace-api:bootJar --no-daemon -x test  # JAR 빌드
 
 # ===== 2단계: 실행 스테이지 =====
-FROM eclipse-temurin:17-jre          # 가벼운 JRE 이미지 (빌드 도구 없음)
+# 가벼운 JRE 이미지 (빌드 도구 없음)
+FROM eclipse-temurin:17-jre          
 WORKDIR /app
 
 # 보안: 루트가 아닌 일반 사용자로 실행
@@ -666,11 +672,15 @@ COPY . .
 RUN gradle build
 
 # 좋은 예: 의존성 파일만 먼저 복사
-COPY build.gradle.kts settings.gradle.kts ./    # 변경 적음
-RUN gradle dependencies                          # 캐시됨
+# 변경 적음
+COPY build.gradle.kts settings.gradle.kts ./    
+# 캐시됨
+RUN gradle dependencies                          
 
-COPY . .                                         # 소스는 자주 변경
-RUN gradle build                                 # 의존성은 캐시 활용
+# 소스는 자주 변경
+COPY . .                                         
+# 의존성은 캐시 활용
+RUN gradle build                                 
 ```
 
 ---
