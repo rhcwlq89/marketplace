@@ -7,7 +7,7 @@
 ## 목차
 
 1. [학습 로드맵](#학습-로드맵)
-2. [Phase 1: 동시성과 분산 락](#phase-1-동시성과-분산-락)
+2. [Phase 1: 동시성 제어와 재고 관리](#phase-1-동시성-제어와-재고-관리)
 3. [Phase 2: 캐싱 전략](#phase-2-캐싱-전략)
 4. [Phase 3: 메시지 큐와 이벤트 드리븐](#phase-3-메시지-큐와-이벤트-드리븐)
 5. [Phase 4: 장애 대응 패턴](#phase-4-장애-대응-패턴)
@@ -23,8 +23,10 @@
 
 ```
 Week 1-2: 동시성 문제 이해
-    └── 재고 감소 문제, Race Condition, Lost Update
-    └── 낙관적 락 vs 비관적 락 vs 분산 락
+    └── 재고 감소 문제, Race Condition, Check-then-Act
+    └── 원자적 UPDATE로 과잉 판매 방지 (핵심!)
+    └── 멱등성 키로 중복 요청 방지
+    └── 분산 락은 언제 정말 필요한가? (캐시 스탬피드, 배치 등)
 
 Week 3-4: 캐싱
     └── 로컬 캐시 vs 분산 캐시
@@ -39,7 +41,7 @@ Week 5-6: 메시지 큐
 Week 7-8: 장애 대응
     └── Circuit Breaker, Retry, Timeout
     └── Rate Limiting, Bulkhead
-    └── Graceful Degradation
+    └── Fallback 전략과 Graceful Degradation
 
 Week 9-10: 데이터베이스
     └── 인덱스 최적화
@@ -54,7 +56,7 @@ Week 11-12: 모니터링
 
 ---
 
-## Phase 1: 동시성과 분산 락
+## Phase 1: 동시성 제어와 재고 관리
 
 ### 핵심 개념
 
@@ -76,36 +78,89 @@ Week 11-12: 모니터링
 
 이것이 **Check-then-Act** 문제이며, **Race Condition**의 대표적인 예입니다.
 
-#### 1.2 해결 방법 비교
+#### 1.2 해결책: 원자적 UPDATE (가장 중요!)
 
-| 방식 | 장점 | 단점 | 사용 시점 |
-|------|------|------|----------|
-| **낙관적 락** | 성능 좋음, 충돌 적을 때 효율적 | 충돌 시 재시도 필요 | 읽기 많고 충돌 적을 때 |
-| **비관적 락** | 충돌 방지 확실 | DB 락으로 성능 저하 | 단일 DB, 충돌 많을 때 |
-| **분산 락** | 다중 서버 환경 지원 | 추가 인프라(Redis) 필요 | MSA, 다중 인스턴스 |
-| **원자적 연산** | 가장 효율적 | 복잡한 로직 어려움 | 단순 증감 연산 |
+**과잉 판매 방지의 핵심은 원자적 UPDATE입니다:**
+
+```sql
+-- Check와 Update를 단일 쿼리로 수행
+UPDATE product
+SET stock_quantity = stock_quantity - :quantity
+WHERE id = :productId
+AND stock_quantity >= :quantity  -- 조건부 업데이트
+
+-- 결과: affected_rows = 1 (성공) 또는 0 (재고 부족)
+```
+
+**왜 이것만으로 충분한가?**
+- DB가 Row-Level Lock을 자동으로 관리
+- 조건을 만족하지 않으면 업데이트 자체가 발생하지 않음
+- 별도의 분산 락 불필요
+
+```
+[요청 A] UPDATE ... WHERE stock >= 1 → Row Lock 획득 → 성공 (1→0)
+[요청 B] UPDATE ... WHERE stock >= 1 → 대기 → 실행 → 조건 불충족 (0건 업데이트)
+```
+
+#### 1.3 해결 방법 비교
+
+| 문제 유형 | 권장 해결책 | 설명 |
+|----------|------------|------|
+| **과잉 판매 방지** | 원자적 UPDATE | DB Row Lock이 동시성 자동 처리 |
+| **중복 주문 방지** | 멱등성 키 (Idempotency Key) | 고유 키로 중복 요청 차단 |
+| **낙관적 락** | @Version 필드 | 충돌 적은 일반 엔티티 업데이트 |
+
+#### 1.4 분산 락은 언제 필요한가?
+
+**대부분의 주문 시나리오에서 분산 락은 불필요합니다.** 분산 락이 필요한 실제 케이스:
+
+| 케이스 | 설명 |
+|--------|------|
+| 캐시 스탬피드 방지 | 캐시 만료 시 하나의 요청만 DB 조회 |
+| 배치 작업 중복 방지 | 스케줄러 동시 실행 차단 |
+| 외부 API 직렬화 | 동시 호출 제한이 있는 API |
+| 복잡한 리소스 예약 | 여러 시스템 걸친 예약 (좌석+결제) |
 
 ### 관련 파일
 
 ```
-marketplace-api/src/main/kotlin/.../common/DistributedLock.kt     # 분산 락 AOP
-marketplace-api/src/main/kotlin/.../config/RedissonConfig.kt       # Redisson 설정
 marketplace-infra/src/main/kotlin/.../ProductJpaRepositoryImpl.kt  # 원자적 쿼리
 marketplace-api/src/main/kotlin/.../order/OrderService.kt          # 적용 예시
+docs/CONCURRENCY_CONTROL.md                                         # 상세 가이드
 ```
 
 ### 코드로 이해하기
 
 ```kotlin
-// 1. 분산 락 어노테이션
-@DistributedLock(key = "'order:create:' + #buyerId", waitTime = 5, leaseTime = 30)
-fun createOrder(buyerId: Long, req: CreateOrderRequest): OrderResponse
+// 1. 원자적 재고 감소 (핵심!)
+fun decreaseStockAtomically(productId: Long, quantity: Int): Int {
+    return entityManager.createQuery("""
+        UPDATE Product p
+        SET p.stockQuantity = p.stockQuantity - :quantity,
+            p.salesCount = p.salesCount + :quantity,
+            p.updatedAt = :now
+        WHERE p.id = :productId
+        AND p.stockQuantity >= :quantity
+        AND p.status = :status
+    """)
+    .setParameter("quantity", quantity)
+    .setParameter("productId", productId)
+    .executeUpdate()
+}
 
-// 2. 원자적 재고 감소 (단일 쿼리로 Check + Update)
-UPDATE Product p
-SET p.stockQuantity = p.stockQuantity - :quantity
-WHERE p.id = :productId
-AND p.stockQuantity >= :quantity  -- 재고 충분할 때만 업데이트
+// 2. Service에서 사용
+val updatedCount = productRepository.decreaseStockAtomically(productId, quantity)
+if (updatedCount == 0) {
+    throw BusinessException(ErrorCode.PRODUCT_OUT_OF_STOCK)
+}
+
+// 3. 멱등성 키로 중복 주문 방지 (선택적)
+fun createOrder(idempotencyKey: String, request: CreateOrderRequest) {
+    if (orderRepository.existsByIdempotencyKey(idempotencyKey)) {
+        return orderRepository.findByIdempotencyKey(idempotencyKey)
+    }
+    // 주문 생성 로직...
+}
 ```
 
 ### 실습해보기
@@ -125,13 +180,17 @@ wait
 
 # 3. 재고 확인 - 음수가 되지 않아야 함
 curl http://localhost:8080/api/v1/products/1
+
+# 4. k6 부하 테스트 실행
+k6 run k6/concurrency-test.js
 ```
 
 ### 생각해볼 질문
 
-1. 분산 락의 waitTime과 leaseTime은 어떻게 설정해야 할까?
-2. 락을 획득한 상태에서 서버가 죽으면 어떻게 될까?
-3. Redisson의 Watchdog은 무엇이고 왜 필요할까?
+1. 원자적 UPDATE만으로 과잉 판매를 방지할 수 있는 이유는?
+2. 여러 상품을 동시에 주문할 때 데드락을 방지하려면?
+3. 멱등성 키와 분산 락의 차이점은 무엇인가?
+4. 분산 락이 정말 필요한 비즈니스 케이스는 어떤 것이 있을까?
 
 ---
 
@@ -154,28 +213,28 @@ QPS 1000일 때:
 #### 2.2 로컬 캐시 vs 분산 캐시
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     로컬 캐시 (Caffeine)                      │
-├─────────────────────────────────────────────────────────────┤
-│  Server A          Server B          Server C               │
-│  ┌────────┐        ┌────────┐        ┌────────┐            │
-│  │ Cache  │        │ Cache  │        │ Cache  │            │
-│  │ Data:X │        │ Data:Y │        │ Data:Z │  ← 불일치!  │
-│  └────────┘        └────────┘        └────────┘            │
-└─────────────────────────────────────────────────────────────┘
+[Local Cache - Caffeine]
 
-┌─────────────────────────────────────────────────────────────┐
-│                     분산 캐시 (Redis)                        │
-├─────────────────────────────────────────────────────────────┤
-│  Server A          Server B          Server C               │
-│     │                 │                 │                   │
-│     └────────────────┬┴─────────────────┘                   │
-│                      ▼                                      │
-│              ┌──────────────┐                               │
-│              │    Redis     │  ← 모든 서버가 같은 데이터    │
-│              │   Cache      │                               │
-│              └──────────────┘                               │
-└─────────────────────────────────────────────────────────────┘
+  Server A          Server B          Server C
+  ┌────────┐        ┌────────┐        ┌────────┐
+  │ Cache  │        │ Cache  │        │ Cache  │
+  │ Data:X │        │ Data:Y │        │ Data:Z │  ← 불일치!
+  └────────┘        └────────┘        └────────┘
+
+  각 서버가 독립적인 캐시 → 데이터 불일치 발생 가능
+
+
+[Distributed Cache - Redis]
+
+  Server A          Server B          Server C
+     │                 │                 │
+     └─────────────────┼─────────────────┘
+                       ▼
+               ┌──────────────┐
+               │    Redis     │  ← 모든 서버가 동일한 데이터
+               └──────────────┘
+
+  중앙 집중식 캐시 → 데이터 일관성 보장
 ```
 
 #### 2.3 캐싱 패턴
@@ -399,23 +458,124 @@ fun createOrderFallback(ex: Throwable): OrderResponse {
 ```
 문제: 하나의 느린 API가 전체 스레드를 점유
 
-┌────────────────────────────────────────────────┐
-│ Thread Pool (10개)                              │
-│  ┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐│
-│  │ A ││ A ││ A ││ A ││ A ││ A ││ A ││ A ││ A ││ A ││
-│  └───┘└───┘└───┘└───┘└───┘└───┘└───┘└───┘└───┘└───┘│
-└────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│ Thread Pool (10개)                                    │
+│  ┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐┌───┐  │
+│  │ A ││ A ││ A ││ A ││ A ││ A ││ A ││ A ││ A ││ A │  │
+│  └───┘└───┘└───┘└───┘└───┘└───┘└───┘└───┘└───┘└───┘  │
+└──────────────────────────────────────────────────────┘
   ↑ 느린 API A가 모든 스레드 점유 → API B 요청 불가!
 
 해결: Bulkhead로 리소스 격리
 
-┌─────────────────────┐  ┌─────────────────────┐
-│ API A Pool (5개)    │  │ API B Pool (5개)    │
-│ ┌───┐┌───┐┌───┐┌───┐┌───┐│  │┌───┐┌───┐┌───┐┌───┐┌───┐│
-│ │ A ││ A ││ A ││ A ││ A ││  ││ B ││ B ││ - ││ - ││ - ││
-│ └───┘└───┘└───┘└───┘└───┘│  │└───┘└───┘└───┘└───┘└───┘│
-└─────────────────────┘  └─────────────────────┘
+┌─────────────────────────┐  ┌─────────────────────────┐
+│ API A Pool (5개)        │  │ API B Pool (5개)        │
+│  ┌───┐┌───┐┌───┐┌───┐┌───┐│  │ ┌───┐┌───┐┌───┐┌───┐┌───┐│
+│  │ A ││ A ││ A ││ A ││ A ││  │ │ B ││ B ││ - ││ - ││ - ││
+│  └───┘└───┘└───┘└───┘└───┘│  │ └───┘└───┘└───┘└───┘└───┘│
+└─────────────────────────┘  └─────────────────────────┘
   ↑ A가 느려도 B는 정상 동작!
+```
+
+#### 4.4 Fallback (대체 응답)
+
+**Fallback**은 주요 기능이 실패했을 때 대체 동작을 제공하는 패턴입니다.
+
+```
+정상 상황:
+Client → Service → 정상 응답
+
+장애 상황 (Fallback 없음):
+Client → Service → 에러 500 → 사용자 이탈
+
+장애 상황 (Fallback 있음):
+Client → Service → 실패 → Fallback → 대체 응답 → 서비스 지속
+```
+
+**Fallback이 사용되는 곳:**
+
+| 상황 | Fallback 예시 |
+|------|--------------|
+| 캐시 장애 | Redis 실패 → DB 직접 조회 |
+| 외부 API 장애 | 결제 API 실패 → "잠시 후 다시 시도" 안내 |
+| Circuit Breaker OPEN | 추천 서비스 장애 → 기본 인기 상품 반환 |
+| DB 장애 | Read Replica 실패 → Primary로 조회 |
+| 이미지 서버 장애 | CDN 실패 → 기본 이미지 표시 |
+
+**Fallback 전략 유형:**
+
+```
+1. 기본값 반환 (Default Value)
+   - 추천 상품 실패 → 빈 리스트 또는 기본 상품 목록
+
+2. 캐시된 데이터 반환 (Cached Data)
+   - 실시간 환율 실패 → 마지막으로 조회한 환율 사용
+
+3. 대체 서비스 호출 (Alternative Service)
+   - 주 결제 API 실패 → 보조 결제 API 호출
+
+4. 기능 제한 (Graceful Degradation)
+   - 추천 기능 장애 → 추천 영역 숨김, 나머지 정상 동작
+
+5. 에러 안내 (Fail-Safe Error)
+   - 복구 불가 → 사용자 친화적 에러 메시지
+```
+
+**코드 예시:**
+
+```kotlin
+// 1. Circuit Breaker와 Fallback
+@CircuitBreaker(name = "recommendService", fallbackMethod = "getRecommendationsFallback")
+fun getRecommendations(userId: Long): List<Product> {
+    return recommendClient.getRecommendations(userId)
+}
+
+// Fallback: 추천 서비스 장애 시 인기 상품 반환
+fun getRecommendationsFallback(userId: Long, ex: Throwable): List<Product> {
+    log.warn("추천 서비스 장애, 인기 상품으로 대체: ${ex.message}")
+    return productRepository.findTop10ByOrderBySalesCountDesc()
+}
+
+// 2. 캐시 Fallback
+fun getProduct(id: Long): Product {
+    return try {
+        // 캐시 조회 시도
+        redisTemplate.opsForValue().get("product:$id") as? Product
+            ?: fetchFromDB(id)
+    } catch (e: RedisConnectionException) {
+        // Redis 장애 시 DB 직접 조회
+        log.warn("Redis 연결 실패, DB 조회로 fallback")
+        fetchFromDB(id)
+    }
+}
+
+// 3. 외부 API Fallback
+fun getExchangeRate(currency: String): BigDecimal {
+    return try {
+        exchangeRateClient.getRate(currency)
+    } catch (e: Exception) {
+        // 외부 API 실패 시 캐시된 환율 사용
+        log.warn("환율 API 실패, 캐시된 값 사용")
+        cachedExchangeRates[currency] ?: DEFAULT_RATE
+    }
+}
+```
+
+**Fallback 설계 원칙:**
+
+```
+1. 핵심 기능 vs 부가 기능 구분
+   - 핵심 (결제): 실패 시 명확한 에러 → 재시도 유도
+   - 부가 (추천): 실패 시 대체 데이터 → 서비스 지속
+
+2. Fallback도 실패할 수 있음을 고려
+   - Primary → Fallback → 최종 기본값 (다단계)
+
+3. Fallback 발생 시 반드시 로깅/알림
+   - 장애 인지 및 대응을 위해
+
+4. Fallback 데이터임을 표시 (선택적)
+   - "추천 상품" → "인기 상품" 으로 라벨 변경
 ```
 
 ### 관련 파일
@@ -446,8 +606,9 @@ curl http://localhost:8080/actuator/health | jq '.components.circuitBreakers'
 ### 생각해볼 질문
 
 1. Circuit Breaker의 실패율 임계값은 어떻게 설정해야 할까?
-2. fallback에서는 어떤 처리를 해야 할까?
+2. Fallback에서 기본값 반환 vs 에러 전파, 어떤 기준으로 결정할까?
 3. Retry와 Circuit Breaker를 함께 사용할 때 주의점은?
+4. Fallback도 실패하면 어떻게 처리해야 할까?
 
 ---
 
@@ -643,10 +804,11 @@ curl http://localhost:8080/actuator/health | jq
 
 ### 중급
 
-4. **분산 락 테스트하기**
-   - 동시에 100개 주문 요청 보내기
-   - 재고가 정확하게 관리되는지 확인
-   - 락 획득 실패 시 에러 응답 확인
+4. **원자적 UPDATE 동시성 테스트**
+   - k6로 동시에 100개 주문 요청 보내기
+   - 재고가 정확하게 관리되는지 확인 (음수 불가)
+   - 재고 소진 시 적절한 에러 응답 확인
+   - 분산 락 없이도 과잉 판매가 발생하지 않음을 검증
 
 5. **Circuit Breaker 동작 테스트**
    - 의도적으로 오류 발생시키기
@@ -678,8 +840,15 @@ curl http://localhost:8080/actuator/health | jq
 ### 동시성
 
 1. 동시에 같은 상품에 100명이 주문하면 어떻게 처리하나요?
-2. 분산 락과 DB 락의 차이점은 무엇인가요?
-3. Redisson의 Watchdog 메커니즘을 설명해주세요.
+   - 핵심: 원자적 UPDATE 쿼리 (`UPDATE WHERE stock >= quantity`)
+   - DB Row Lock이 동시성 자동 처리
+   - 조건 불충족 시 업데이트 자체가 안 됨 → 과잉 판매 방지
+2. 분산 락과 원자적 UPDATE의 차이점은 무엇인가요?
+   - 원자적 UPDATE: DB 레벨에서 재고 보호, 대부분의 경우 충분
+   - 분산 락: 애플리케이션 레벨 제어, 캐시 스탬피드/배치 중복 방지 등 특수 케이스
+3. 분산 락이 정말 필요한 케이스는 무엇인가요?
+   - 캐시 스탬피드 방지, 배치 작업 중복 방지, 외부 API 직렬화
+   - 단순 재고 관리에는 오버엔지니어링
 
 ### 캐싱
 
@@ -698,18 +867,22 @@ curl http://localhost:8080/actuator/health | jq
 10. Circuit Breaker의 상태 전이를 설명해주세요.
 11. Rate Limiting은 어떤 방식으로 구현할 수 있나요?
 12. Graceful Shutdown은 왜 필요한가요?
+13. Fallback 전략은 무엇이고 언제 사용하나요?
+    - 주요 기능 실패 시 대체 동작 제공
+    - 캐시 장애 → DB 직접 조회, 추천 실패 → 인기 상품 반환
+    - 핵심 기능(결제)은 실패 전파, 부가 기능(추천)은 Fallback 적용
 
 ### 데이터베이스
 
-13. 인덱스의 장단점은 무엇인가요?
-14. 커서 기반 페이지네이션의 장점은 무엇인가요?
-15. N+1 문제를 어떻게 해결하나요?
+14. 인덱스의 장단점은 무엇인가요?
+15. 커서 기반 페이지네이션의 장점은 무엇인가요?
+16. N+1 문제를 어떻게 해결하나요?
 
 ### 모니터링
 
-16. p99 응답시간이 중요한 이유는 무엇인가요?
-17. 어떤 메트릭을 모니터링해야 하나요?
-18. 알람 설정 시 주의할 점은 무엇인가요?
+17. p99 응답시간이 중요한 이유는 무엇인가요?
+18. 어떤 메트릭을 모니터링해야 하나요?
+19. 알람 설정 시 주의할 점은 무엇인가요?
 
 ---
 

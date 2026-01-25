@@ -1,0 +1,101 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: app-config
+  namespace: marketplace
+data:
+  SPRING_PROFILES_ACTIVE: docker
+  MYSQL_HOST: mysql
+  MYSQL_PORT: "3306"
+  MYSQL_DATABASE: marketplace
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-secret
+  namespace: marketplace
+type: Opaque
+stringData:
+  MYSQL_USER: marketplace
+  MYSQL_PASSWORD: marketplace123
+  JWT_SECRET: marketplace-jwt-secret-key-for-docker-minimum-32-characters
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: marketplace-app
+  namespace: marketplace
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: marketplace-app
+  template:
+    metadata:
+      labels:
+        app: marketplace-app
+    spec:
+      containers:
+        - name: app
+          image: marketplace-registry:5000/marketplace-app:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: app-secret
+          readinessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 90
+            periodSeconds: 20
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: marketplace-app
+  namespace: marketplace
+spec:
+  selector:
+    app: marketplace-app
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: marketplace-ingress
+  namespace: marketplace
+  annotations:
+    ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: marketplace-app
+                port:
+                  number: 80

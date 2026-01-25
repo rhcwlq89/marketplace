@@ -1,5 +1,10 @@
 package com.example.marketplace.config
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
+import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
+import com.fasterxml.jackson.module.kotlin.KotlinModule
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.cache.CacheManager
 import org.springframework.cache.annotation.EnableCaching
@@ -22,6 +27,21 @@ import java.time.Duration
 @Profile("docker", "prod")
 class RedisConfig {
 
+    private fun redisObjectMapper(): ObjectMapper {
+        val typeValidator = BasicPolymorphicTypeValidator.builder()
+            .allowIfBaseType(Any::class.java)
+            .build()
+
+        return ObjectMapper().apply {
+            registerModule(KotlinModule.Builder().build())
+            registerModule(JavaTimeModule())
+            disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+            activateDefaultTyping(typeValidator, ObjectMapper.DefaultTyping.NON_FINAL)
+        }
+    }
+
+    private fun redisSerializer() = GenericJackson2JsonRedisSerializer(redisObjectMapper())
+
     @Value("\${spring.data.redis.host:localhost}")
     private lateinit var redisHost: String
 
@@ -42,36 +62,41 @@ class RedisConfig {
 
     @Bean
     fun redisTemplate(connectionFactory: RedisConnectionFactory): RedisTemplate<String, Any> {
+        val serializer = redisSerializer()
         return RedisTemplate<String, Any>().apply {
             setConnectionFactory(connectionFactory)
             keySerializer = StringRedisSerializer()
-            valueSerializer = GenericJackson2JsonRedisSerializer()
+            valueSerializer = serializer
             hashKeySerializer = StringRedisSerializer()
-            hashValueSerializer = GenericJackson2JsonRedisSerializer()
+            hashValueSerializer = serializer
         }
     }
 
     @Bean
     fun cacheManager(connectionFactory: RedisConnectionFactory): CacheManager {
+        val serializer = redisSerializer()
+        val keySerializer = RedisSerializationContext.SerializationPair.fromSerializer(StringRedisSerializer())
+        val valueSerializer = RedisSerializationContext.SerializationPair.fromSerializer(serializer)
+
         val defaultCacheConfig = RedisCacheConfiguration.defaultCacheConfig()
             .entryTtl(Duration.ofMinutes(10))
-            .serializeKeysWith(RedisSerializationContext.SerializationPair.fromSerializer(StringRedisSerializer()))
-            .serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(GenericJackson2JsonRedisSerializer()))
+            .serializeKeysWith(keySerializer)
+            .serializeValuesWith(valueSerializer)
             .disableCachingNullValues()
 
         val cacheConfigurations = mapOf(
             "popularProducts" to RedisCacheConfiguration.defaultCacheConfig()
                 .entryTtl(Duration.ofMinutes(10))
-                .serializeKeysWith(RedisSerializationContext.SerializationPair.fromSerializer(StringRedisSerializer()))
-                .serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(GenericJackson2JsonRedisSerializer())),
+                .serializeKeysWith(keySerializer)
+                .serializeValuesWith(valueSerializer),
             "categories" to RedisCacheConfiguration.defaultCacheConfig()
                 .entryTtl(Duration.ofHours(1))
-                .serializeKeysWith(RedisSerializationContext.SerializationPair.fromSerializer(StringRedisSerializer()))
-                .serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(GenericJackson2JsonRedisSerializer())),
+                .serializeKeysWith(keySerializer)
+                .serializeValuesWith(valueSerializer),
             "tokenBlacklist" to RedisCacheConfiguration.defaultCacheConfig()
                 .entryTtl(Duration.ofHours(24))
-                .serializeKeysWith(RedisSerializationContext.SerializationPair.fromSerializer(StringRedisSerializer()))
-                .serializeValuesWith(RedisSerializationContext.SerializationPair.fromSerializer(GenericJackson2JsonRedisSerializer()))
+                .serializeKeysWith(keySerializer)
+                .serializeValuesWith(valueSerializer)
         )
 
         return RedisCacheManager.builder(connectionFactory)
