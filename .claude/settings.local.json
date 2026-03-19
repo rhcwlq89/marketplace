@@ -9,7 +9,10 @@
       "Bash(find:*)",
       "Bash(grep:*)",
       "Bash(xargs cat:*)",
-      "Bash(./gradlew:*)"
+      "Bash(./gradlew:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(git add:*)",
+      "Bash(git commit:*)"
     ]
   }
 }
