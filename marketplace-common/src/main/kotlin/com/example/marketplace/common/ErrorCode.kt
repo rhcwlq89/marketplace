@@ -43,5 +43,17 @@ enum class ErrorCode(
     ORDER_NOT_OWNED(HttpStatus.FORBIDDEN, "You don't own this order"),
     INVALID_ORDER_STATUS(HttpStatus.BAD_REQUEST, "Invalid order status"),
     CANNOT_CANCEL_ORDER(HttpStatus.BAD_REQUEST, "Cannot cancel order in current status"),
-    EMPTY_ORDER_ITEMS(HttpStatus.BAD_REQUEST, "Order items cannot be empty")
+    EMPTY_ORDER_ITEMS(HttpStatus.BAD_REQUEST, "Order items cannot be empty"),
+
+    // Cart
+    CART_NOT_FOUND(HttpStatus.NOT_FOUND, "Cart not found"),
+    CART_ITEM_NOT_FOUND(HttpStatus.NOT_FOUND, "Cart item not found"),
+    INVALID_CART_QUANTITY(HttpStatus.BAD_REQUEST, "Invalid cart quantity"),
+    CART_QUANTITY_EXCEEDED(HttpStatus.BAD_REQUEST, "Cart quantity cannot exceed 99"),
+    EMPTY_CART(HttpStatus.BAD_REQUEST, "Cart is empty"),
+    CANNOT_ADD_OWN_PRODUCT(HttpStatus.BAD_REQUEST, "Cannot add your own product to cart"),
+    PRODUCT_NOT_AVAILABLE(HttpStatus.BAD_REQUEST, "Product is not available for purchase"),
+
+    // Checkout
+    PAYMENT_FAILED(HttpStatus.BAD_REQUEST, "Payment failed")
 }

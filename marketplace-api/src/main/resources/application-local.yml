@@ -1,4 +1,9 @@
 spring:
+  autoconfigure:
+    exclude:
+      - org.redisson.spring.starter.RedissonAutoConfigurationV2
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.kafka.KafkaAutoConfiguration
   datasource:
     url: jdbc:h2:mem:marketplace;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
     driverClassName: org.h2.Driver
