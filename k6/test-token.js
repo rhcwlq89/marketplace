@@ -60,6 +60,7 @@ export default function () {
     if (orderRes.status === 200) {
         successCount.add(1);
     } else {
+        if (__ITER < 3) console.log(`Order failed: status=${orderRes.status} body=${orderRes.body}`);
         failCount.add(1);
     }
 

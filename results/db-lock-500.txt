@@ -1,0 +1,55 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: k6/test-db-lock.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 500 max VUs, 1m30s max duration (incl. graceful stop):
+              * spike: 500 iterations shared among 500 VUs (maxDuration: 1m0s, gracefulStop: 30s)
+
+time="2026-03-27T21:47:57+09:00" level=info msg="Reset complete. Starting DB Lock test..." source=console
+
+running (0m00.9s), 497/500 VUs, 3 complete and 0 interrupted iterations
+spike   [   1% ] 500 VUs  0m00.9s/1m0s  003/500 shared iters
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 501     274.605262/s
+    checks_succeeded...: 100.00% 501 out of 501
+    checks_failed......: 0.00%   0 out of 501
+
+    ✓ reset ok
+    ✓ status is 200 or 409
+
+    CUSTOM
+    fail_count.....................: 400    219.245718/s
+    purchase_time..................: avg=1512.624 min=25      med=1582  max=1769  p(90)=1740.1 p(95)=1754.05
+    success_count..................: 100    54.811429/s
+
+    HTTP
+    http_req_duration..............: avg=1.47s    min=22.24ms med=1.53s max=1.71s p(90)=1.68s  p(95)=1.69s  
+      { expected_response:true }...: avg=1.11s    min=22.24ms med=1.14s max=1.35s p(90)=1.31s  p(95)=1.33s  
+    http_req_failed................: 79.84% 400 out of 501
+    http_reqs......................: 501    274.605262/s
+
+    EXECUTION
+    iteration_duration.............: avg=1.51s    min=25.29ms med=1.58s max=1.76s p(90)=1.74s  p(95)=1.75s  
+    iterations.....................: 500    274.057147/s
+    vus............................: 497    min=497        max=497
+    vus_max........................: 500    min=500        max=500
+
+    NETWORK
+    data_received..................: 210 kB 115 kB/s
+    data_sent......................: 93 kB  51 kB/s
+
+
+
+
+running (0m01.8s), 000/500 VUs, 500 complete and 0 interrupted iterations
+spike ✓ [ 100% ] 500 VUs  0m01.8s/1m0s  500/500 shared iters

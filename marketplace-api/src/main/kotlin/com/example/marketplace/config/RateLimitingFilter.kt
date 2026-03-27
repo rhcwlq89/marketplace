@@ -66,6 +66,12 @@ class RateLimitingFilter(
         return path.startsWith("/actuator") ||
                 path.startsWith("/swagger") ||
                 path.startsWith("/v3/api-docs") ||
-                path.startsWith("/h2-console")
+                path.startsWith("/h2-console") ||
+                path.startsWith("/api/orders/db-lock") ||
+                path.startsWith("/api/orders/redis") ||
+                path.startsWith("/api/orders/token") ||
+                path.startsWith("/api/queue") ||
+                path.startsWith("/api/tokens") ||
+                path.startsWith("/api/fcfs")
     }
 }

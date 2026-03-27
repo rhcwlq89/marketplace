@@ -1,0 +1,49 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+     execution: local
+        script: k6/test-db-lock.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 100 max VUs, 1m30s max duration (incl. graceful stop):
+              * spike: 100 iterations shared among 100 VUs (maxDuration: 1m0s, gracefulStop: 30s)
+
+time="2026-03-27T21:47:55+09:00" level=info msg="Reset complete. Starting DB Lock test..." source=console
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 101     156.783364/s
+    checks_succeeded...: 100.00% 101 out of 101
+    checks_failed......: 0.00%   0 out of 101
+
+    ✓ reset ok
+    ✓ status is 200 or 409
+
+    CUSTOM
+    purchase_time..................: avg=324.01   min=27      med=341.5    max=563      p(90)=525.1    p(95)=544.05  
+    success_count..................: 100   155.231054/s
+
+    HTTP
+    http_req_duration..............: avg=320.4ms  min=27.03ms med=340.73ms max=563.34ms p(90)=518.61ms p(95)=543.19ms
+      { expected_response:true }...: avg=320.4ms  min=27.03ms med=340.73ms max=563.34ms p(90)=518.61ms p(95)=543.19ms
+    http_req_failed................: 0.00% 0 out of 101
+    http_reqs......................: 101   156.783364/s
+
+    EXECUTION
+    iteration_duration.............: avg=324.78ms min=27.44ms med=343.95ms max=563.75ms p(90)=526.3ms  p(95)=545.27ms
+    iterations.....................: 100   155.231054/s
+
+    NETWORK
+    data_received..................: 42 kB 64 kB/s
+    data_sent......................: 19 kB 29 kB/s
+
+
+
+
+running (0m00.6s), 000/100 VUs, 100 complete and 0 interrupted iterations
+spike ✓ [ 100% ] 100 VUs  0m00.6s/1m0s  100/100 shared iters
