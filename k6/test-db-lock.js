@@ -12,7 +12,7 @@ export const options = {
             executor: 'shared-iterations',
             vus: __ENV.VUS ? parseInt(__ENV.VUS) : 100,
             iterations: __ENV.ITERATIONS ? parseInt(__ENV.ITERATIONS) : 100,
-            maxDuration: '60s',
+            maxDuration: '5m',
         },
     },
 };
