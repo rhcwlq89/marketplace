@@ -39,3 +39,6 @@ uploads/
 # Test
 /test-results/
 /coverage/
+
+# k6 load test results
+results/
