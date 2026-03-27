@@ -44,6 +44,11 @@ class SecurityConfig(
                     ).permitAll()
                     // H2 Console
                     .requestMatchers("/h2-console/**").permitAll()
+                    // FCFS load test endpoints
+                    .requestMatchers("/api/orders/db-lock", "/api/orders/redis", "/api/orders/token").permitAll()
+                    .requestMatchers("/api/queue/**").permitAll()
+                    .requestMatchers("/api/tokens/**").permitAll()
+                    .requestMatchers("/api/fcfs/**").permitAll()
                     // All other requests require authentication
                     .anyRequest().authenticated()
             }

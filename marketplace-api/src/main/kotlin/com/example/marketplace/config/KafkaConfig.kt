@@ -30,6 +30,7 @@ class KafkaConfig {
         const val ORDER_CREATED_TOPIC = "marketplace.order.created"
         const val ORDER_STATUS_CHANGED_TOPIC = "marketplace.order.status-changed"
         const val OUTBOX_TOPIC = "marketplace.outbox"
+        const val FCFS_QUEUE_ORDERS_TOPIC = "fcfs.queue.orders"
     }
 
     @Bean
@@ -93,6 +94,14 @@ class KafkaConfig {
     @Bean
     fun outboxTopic(): NewTopic {
         return TopicBuilder.name(OUTBOX_TOPIC)
+            .partitions(3)
+            .replicas(1)
+            .build()
+    }
+
+    @Bean
+    fun fcfsQueueOrdersTopic(): NewTopic {
+        return TopicBuilder.name(FCFS_QUEUE_ORDERS_TOPIC)
             .partitions(3)
             .replicas(1)
             .build()
