@@ -69,24 +69,48 @@ class FcfsQueueService(
         }
     }
 
+    /**
+     * 스케줄러: 3초마다 10명씩 대기열에서 꺼내 허용
+     * ZPOPMIN + SADD를 Lua 스크립트로 원자적으로 실행하여
+     * queue에서 빠졌지만 allowed에 아직 안 들어간 과도 상태를 방지한다.
+     */
     @Scheduled(fixedDelay = 3000)
     fun processQueue() {
         val productId = TARGET_PRODUCT_ID
         val queueKey = "$QUEUE_KEY_PREFIX$productId"
         val allowedKey = "$ALLOWED_KEY_PREFIX$productId"
 
-        val users = redisTemplate.opsForZSet().popMin(queueKey, 10)
-        if (users.isNullOrEmpty()) return
+        // Lua: ZPOPMIN → SADD를 원자적으로 실행, 이동된 userId 목록 반환
+        val script = """
+            local queueKey = KEYS[1]
+            local allowedKey = KEYS[2]
+            local count = tonumber(ARGV[1])
+            local moved = {}
+            for i = 1, count do
+                local result = redis.call('ZPOPMIN', queueKey)
+                if #result == 0 then break end
+                local userId = result[1]
+                redis.call('SADD', allowedKey, userId)
+                table.insert(moved, userId)
+            end
+            return moved
+        """.trimIndent()
 
-        for (typedTuple in users) {
-            val userId = typedTuple.value ?: continue
-            redisTemplate.opsForSet().add(allowedKey, userId)
+        val result = redisTemplate.execute(
+            org.springframework.data.redis.core.script.DefaultRedisScript<List<*>>(script, List::class.java),
+            listOf(queueKey, allowedKey),
+            "10"
+        )
 
+        val movedUsers = result?.filterIsInstance<String>() ?: return
+        if (movedUsers.isEmpty()) return
+
+        for (userId in movedUsers) {
             val event = mapOf("productId" to productId, "userId" to userId.toLong())
             kafkaTemplate.send(KafkaConfig.FCFS_QUEUE_ORDERS_TOPIC, userId, event)
         }
 
-        log.info("[FCFS Queue] {}명 진입 허용", users.size)
+        log.info("[FCFS Queue] {}명 진입 허용", movedUsers.size)
     }
 
     @KafkaListener(
@@ -109,10 +133,18 @@ class FcfsQueueService(
             )
         }
 
+        // 재고 차감 성공/실패 무관하게 처리 완료 표시
+        // k6에서는 COMPLETED 상태로 폴링 종료
         val completedKey = "$COMPLETED_KEY_PREFIX$productId"
         redisTemplate.opsForSet().add(completedKey, userId.toString())
 
         val allowedKey = "$ALLOWED_KEY_PREFIX$productId"
         redisTemplate.opsForSet().remove(allowedKey, userId.toString())
+
+        if (updated > 0) {
+            log.info("[FCFS Queue] 주문 성공: userId={}", userId)
+        } else {
+            log.info("[FCFS Queue] 재고 소진: userId={}", userId)
+        }
     }
 }

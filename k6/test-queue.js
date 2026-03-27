@@ -36,6 +36,12 @@ export default function () {
 
     check(enterRes, { 'enter ok': (r) => r.status === 200 });
 
+    if (enterRes.status !== 200) {
+        failCount.add(1);
+        purchaseTime.add(Date.now() - start);
+        return;
+    }
+
     // Phase 2: 폴링 — COMPLETED될 때까지 대기
     let completed = false;
     for (let i = 0; i < 60; i++) {
