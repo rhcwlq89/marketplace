@@ -1,18 +1,17 @@
 services:
-  mysql:
-    image: mysql:8.0
-    container_name: marketplace-mysql
+  postgres:
+    image: postgres:16-alpine
+    container_name: marketplace-postgres
     environment:
-      MYSQL_ROOT_PASSWORD: root123
-      MYSQL_DATABASE: marketplace
-      MYSQL_USER: marketplace
-      MYSQL_PASSWORD: marketplace123
+      POSTGRES_DB: marketplace
+      POSTGRES_USER: marketplace
+      POSTGRES_PASSWORD: marketplace123
     ports:
-      - "3306:3306"
+      - "5432:5432"
     volumes:
-      - mysql-data:/var/lib/mysql
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: ["CMD-SHELL", "pg_isready -U marketplace -d marketplace"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -126,17 +125,17 @@ services:
       - "8080:8080"
     environment:
       SPRING_PROFILES_ACTIVE: docker
-      MYSQL_HOST: mysql
-      MYSQL_PORT: 3306
-      MYSQL_DATABASE: marketplace
-      MYSQL_USER: marketplace
-      MYSQL_PASSWORD: marketplace123
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: marketplace
+      DB_USER: marketplace
+      DB_PASSWORD: marketplace123
       REDIS_HOST: redis
       REDIS_PORT: 6379
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       JWT_SECRET: marketplace-jwt-secret-key-for-docker-minimum-32-characters
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -146,7 +145,7 @@ services:
       - marketplace-network
 
 volumes:
-  mysql-data:
+  postgres-data:
   redis-data:
   zookeeper-data:
   zookeeper-logs:

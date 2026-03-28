@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
-  name: mysql-pvc
+  name: postgres-pvc
   namespace: marketplace
 spec:
   accessModes:
@@ -13,65 +13,64 @@ spec:
 apiVersion: v1
 kind: Secret
 metadata:
-  name: mysql-secret
+  name: postgres-secret
   namespace: marketplace
 type: Opaque
 stringData:
-  MYSQL_ROOT_PASSWORD: root123
-  MYSQL_DATABASE: marketplace
-  MYSQL_USER: marketplace
-  MYSQL_PASSWORD: marketplace123
+  POSTGRES_DB: marketplace
+  POSTGRES_USER: marketplace
+  POSTGRES_PASSWORD: marketplace123
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mysql
+  name: postgres
   namespace: marketplace
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: mysql
+      app: postgres
   template:
     metadata:
       labels:
-        app: mysql
+        app: postgres
     spec:
       containers:
-        - name: mysql
-          image: mysql:8.0
+        - name: postgres
+          image: postgres:16-alpine
           ports:
-            - containerPort: 3306
+            - containerPort: 5432
           envFrom:
             - secretRef:
-                name: mysql-secret
+                name: postgres-secret
           volumeMounts:
-            - name: mysql-storage
-              mountPath: /var/lib/mysql
+            - name: postgres-storage
+              mountPath: /var/lib/postgresql/data
           readinessProbe:
             exec:
-              command: ["mysqladmin", "ping", "-h", "localhost"]
-            initialDelaySeconds: 30
+              command: ["pg_isready", "-U", "marketplace", "-d", "marketplace"]
+            initialDelaySeconds: 10
             periodSeconds: 10
           livenessProbe:
             exec:
-              command: ["mysqladmin", "ping", "-h", "localhost"]
-            initialDelaySeconds: 60
+              command: ["pg_isready", "-U", "marketplace", "-d", "marketplace"]
+            initialDelaySeconds: 30
             periodSeconds: 20
       volumes:
-        - name: mysql-storage
+        - name: postgres-storage
           persistentVolumeClaim:
-            claimName: mysql-pvc
+            claimName: postgres-pvc
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: mysql
+  name: postgres
   namespace: marketplace
 spec:
   selector:
-    app: mysql
+    app: postgres
   ports:
-    - port: 3306
-      targetPort: 3306
+    - port: 5432
+      targetPort: 5432
   type: ClusterIP

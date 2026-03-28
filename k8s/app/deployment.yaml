@@ -5,9 +5,9 @@ metadata:
   namespace: marketplace
 data:
   SPRING_PROFILES_ACTIVE: docker
-  MYSQL_HOST: mysql
-  MYSQL_PORT: "3306"
-  MYSQL_DATABASE: marketplace
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: marketplace
   REDIS_HOST: redis
   REDIS_PORT: "6379"
   KAFKA_BOOTSTRAP_SERVERS: kafka:9092
@@ -19,8 +19,8 @@ metadata:
   namespace: marketplace
 type: Opaque
 stringData:
-  MYSQL_USER: marketplace
-  MYSQL_PASSWORD: marketplace123
+  DB_USER: marketplace
+  DB_PASSWORD: marketplace123
   JWT_SECRET: marketplace-jwt-secret-key-for-docker-minimum-32-characters
 ---
 apiVersion: apps/v1
