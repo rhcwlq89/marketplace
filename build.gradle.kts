@@ -1,12 +1,12 @@
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
-    id("org.springframework.boot") version "3.2.2"
-    id("io.spring.dependency-management") version "1.1.4"
-    kotlin("jvm") version "1.9.22"
-    kotlin("plugin.spring") version "1.9.22"
-    kotlin("plugin.jpa") version "1.9.22"
-    kotlin("kapt") version "1.9.22"
+    id("org.springframework.boot") version "4.0.6"
+    id("io.spring.dependency-management") version "1.1.6"
+    kotlin("jvm") version "2.3.0"
+    kotlin("plugin.spring") version "2.3.0"
+    kotlin("plugin.jpa") version "2.3.0"
+    kotlin("kapt") version "2.3.0"
 }
 
 // QueryDSL version
@@ -30,7 +30,7 @@ subprojects {
 
     dependencyManagement {
         imports {
-            mavenBom("org.springframework.boot:spring-boot-dependencies:3.2.2")
+            mavenBom("org.springframework.boot:spring-boot-dependencies:4.0.6")
         }
     }
 
@@ -42,14 +42,14 @@ subprojects {
 
         // Test
         testImplementation("org.springframework.boot:spring-boot-starter-test")
-        testImplementation("io.mockk:mockk:1.13.9")
-        testImplementation("com.ninja-squad:springmockk:4.0.2")
+        testImplementation("io.mockk:mockk:1.13.13")
+        testImplementation("com.ninja-squad:springmockk:5.0.1")
     }
 
     tasks.withType<KotlinCompile> {
-        kotlinOptions {
-            freeCompilerArgs = listOf("-Xjsr305=strict")
-            jvmTarget = "17"
+        compilerOptions {
+            freeCompilerArgs.add("-Xjsr305=strict")
+            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_21)
         }
     }
 
@@ -58,7 +58,9 @@ subprojects {
     }
 
     java {
-        sourceCompatibility = JavaVersion.VERSION_17
+        toolchain {
+            languageVersion.set(JavaLanguageVersion.of(21))
+        }
     }
 }
 

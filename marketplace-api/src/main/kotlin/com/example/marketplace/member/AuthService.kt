@@ -32,7 +32,7 @@ class AuthService(
 
         val member = Member(
             email = req.email,
-            password = passwordEncoder.encode(req.password),
+            password = passwordEncoder.encode(req.password)!!,
             name = req.name,
             phone = req.phone,
             role = role,

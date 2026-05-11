@@ -1,17 +1,21 @@
 package com.example.marketplace.security
 
-import io.jsonwebtoken.*
-import io.jsonwebtoken.security.Keys
-import jakarta.annotation.PostConstruct
+import org.springframework.security.oauth2.jose.jws.MacAlgorithm
+import org.springframework.security.oauth2.jwt.JwsHeader
+import org.springframework.security.oauth2.jwt.JwtClaimsSet
+import org.springframework.security.oauth2.jwt.JwtDecoder
+import org.springframework.security.oauth2.jwt.JwtEncoder
+import org.springframework.security.oauth2.jwt.JwtEncoderParameters
+import org.springframework.security.oauth2.jwt.JwtException
 import org.springframework.stereotype.Component
-import java.security.Key
-import java.util.*
+import java.time.Instant
 
 @Component
 class JwtTokenProvider(
-    private val jwtProperties: JwtProperties
+    private val jwtProperties: JwtProperties,
+    private val jwtEncoder: JwtEncoder,
+    private val jwtDecoder: JwtDecoder,
 ) {
-    private lateinit var key: Key
 
     val accessTokenValidityInSeconds: Long
         get() = jwtProperties.accessTokenValidity / 1000
@@ -19,54 +23,31 @@ class JwtTokenProvider(
     val refreshTokenValidityInSeconds: Long
         get() = jwtProperties.refreshTokenValidity / 1000
 
-    @PostConstruct
-    fun init() {
-        key = if (jwtProperties.secret.isNotBlank() && jwtProperties.secret.toByteArray().size >= 32) {
-            Keys.hmacShaKeyFor(jwtProperties.secret.toByteArray())
-        } else {
-            Keys.secretKeyFor(SignatureAlgorithm.HS256)
-        }
+    fun createAccessToken(userId: Long, email: String, role: String): String =
+        encode(userId, email, role, jwtProperties.accessTokenValidity)
+
+    fun createRefreshToken(userId: Long, email: String, role: String): String =
+        encode(userId, email, role, jwtProperties.refreshTokenValidity)
+
+    fun validateToken(token: String): Boolean = try {
+        jwtDecoder.decode(token)
+        true
+    } catch (ex: JwtException) {
+        false
     }
 
-    fun createAccessToken(userId: Long, email: String, role: String): String {
-        val now = Date()
-        val expiry = Date(now.time + jwtProperties.accessTokenValidity)
-        return Jwts.builder()
-            .setSubject(userId.toString())
-            .setIssuedAt(now)
-            .setExpiration(expiry)
+    fun getUserId(token: String): Long = jwtDecoder.decode(token).subject.toLong()
+
+    private fun encode(userId: Long, email: String, role: String, validityMillis: Long): String {
+        val now = Instant.now()
+        val claims = JwtClaimsSet.builder()
+            .subject(userId.toString())
+            .issuedAt(now)
+            .expiresAt(now.plusMillis(validityMillis))
             .claim("email", email)
             .claim("role", role)
-            .signWith(key, SignatureAlgorithm.HS256)
-            .compact()
+            .build()
+        val header = JwsHeader.with(MacAlgorithm.HS256).build()
+        return jwtEncoder.encode(JwtEncoderParameters.from(header, claims)).tokenValue
     }
-
-    fun createRefreshToken(userId: Long, email: String, role: String): String {
-        val now = Date()
-        val expiry = Date(now.time + jwtProperties.refreshTokenValidity)
-        return Jwts.builder()
-            .setSubject(userId.toString())
-            .setIssuedAt(now)
-            .setExpiration(expiry)
-            .claim("email", email)
-            .claim("role", role)
-            .signWith(key, SignatureAlgorithm.HS256)
-            .compact()
-    }
-
-    fun validateToken(token: String): Boolean {
-        return try {
-            Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(token)
-            true
-        } catch (ex: JwtException) {
-            false
-        }
-    }
-
-    fun getUserId(token: String): Long {
-        val claims = Jwts.parserBuilder().setSigningKey(key).build().parseClaimsJws(token).body
-        return claims.subject.toLong()
-    }
-
-    fun getKey(): Key = key
 }

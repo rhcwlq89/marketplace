@@ -42,7 +42,7 @@ class DataInitializer {
         val admin = memberJpaRepository.save(
             Member(
                 email = "admin@example.com",
-                password = passwordEncoder.encode("admin123!"),
+                password = passwordEncoder.encode("admin123!")!!,
                 name = "Admin User",
                 phone = "010-0000-0000",
                 role = Role.ADMIN
@@ -53,7 +53,7 @@ class DataInitializer {
         val seller = memberJpaRepository.save(
             Member(
                 email = "seller@example.com",
-                password = passwordEncoder.encode("seller123!"),
+                password = passwordEncoder.encode("seller123!")!!,
                 name = "Seller User",
                 phone = "010-1111-1111",
                 role = Role.SELLER,
@@ -65,7 +65,7 @@ class DataInitializer {
         val buyer = memberJpaRepository.save(
             Member(
                 email = "buyer@example.com",
-                password = passwordEncoder.encode("buyer123!"),
+                password = passwordEncoder.encode("buyer123!")!!,
                 name = "Buyer User",
                 phone = "010-2222-2222",
                 role = Role.BUYER
