@@ -39,3 +39,6 @@ uploads/
 # Test
 /test-results/
 /coverage/
+
+# Load test results
+results/
