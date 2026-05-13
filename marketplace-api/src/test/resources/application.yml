@@ -10,7 +10,7 @@ spring:
     show-sql: false
 
 jwt:
-  secret: test-jwt-secret-key-for-testing
+  secret: test-jwt-secret-key-for-testing-must-be-at-least-32-bytes
 
 logging:
   level:

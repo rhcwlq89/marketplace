@@ -1,0 +1,346 @@
+= Marketplace API Reference
+:doctype: book
+:icons: font
+:source-highlighter: highlightjs
+:toc: left
+:toclevels: 3
+:sectlinks:
+:sectnums:
+
+== 개요
+
+본 문서는 Marketplace API의 REST 엔드포인트 명세입니다. 모든 스니펫은 **통과한 컨트롤러 테스트**에서 자동 생성되었으므로, 실제 동작과 동기화됩니다.
+
+* Base URL: `/api/v1`
+* 인증: JWT Bearer 토큰 (`Authorization: Bearer <accessToken>`)
+* 응답 포맷: `{ code, message, data }` (`CommonResponse<T>`)
+
+== Auth
+
+=== 회원가입
+
+`POST /api/v1/auth/signup`
+
+==== Request
+
+include::{snippets}/auth-signup/http-request.adoc[]
+
+include::{snippets}/auth-signup/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/auth-signup/http-response.adoc[]
+
+include::{snippets}/auth-signup/response-fields.adoc[]
+
+=== 로그인
+
+`POST /api/v1/auth/login`
+
+==== Request
+
+include::{snippets}/auth-login/http-request.adoc[]
+
+include::{snippets}/auth-login/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/auth-login/http-response.adoc[]
+
+include::{snippets}/auth-login/response-fields.adoc[]
+
+== Members
+
+=== 내 정보 조회
+
+`GET /api/v1/members/me`
+
+==== Request
+
+include::{snippets}/members-me-get/http-request.adoc[]
+
+include::{snippets}/members-me-get/request-headers.adoc[]
+
+==== Response
+
+include::{snippets}/members-me-get/http-response.adoc[]
+
+include::{snippets}/members-me-get/response-fields.adoc[]
+
+=== 내 정보 수정
+
+`PATCH /api/v1/members/me`
+
+==== Request
+
+include::{snippets}/members-me-update/http-request.adoc[]
+
+include::{snippets}/members-me-update/request-headers.adoc[]
+
+include::{snippets}/members-me-update/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/members-me-update/http-response.adoc[]
+
+include::{snippets}/members-me-update/response-fields.adoc[]
+
+=== 회원 목록 조회 (ADMIN)
+
+`GET /api/v1/admin/members`
+
+==== Request
+
+include::{snippets}/admin-members-list/http-request.adoc[]
+
+include::{snippets}/admin-members-list/request-headers.adoc[]
+
+==== Response
+
+include::{snippets}/admin-members-list/http-response.adoc[]
+
+include::{snippets}/admin-members-list/response-fields.adoc[]
+
+== Categories
+
+=== 카테고리 목록 조회
+
+`GET /api/v1/categories`
+
+==== Request
+
+include::{snippets}/categories-list/http-request.adoc[]
+
+==== Response
+
+include::{snippets}/categories-list/http-response.adoc[]
+
+include::{snippets}/categories-list/response-fields.adoc[]
+
+=== 카테고리 등록 (ADMIN)
+
+`POST /api/v1/admin/categories`
+
+==== Request
+
+include::{snippets}/admin-categories-create/http-request.adoc[]
+
+include::{snippets}/admin-categories-create/request-headers.adoc[]
+
+include::{snippets}/admin-categories-create/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/admin-categories-create/http-response.adoc[]
+
+include::{snippets}/admin-categories-create/response-fields.adoc[]
+
+== Products
+
+=== 상품 등록 (SELLER)
+
+`POST /api/v1/products`
+
+==== Request
+
+include::{snippets}/products-create/http-request.adoc[]
+
+include::{snippets}/products-create/request-headers.adoc[]
+
+include::{snippets}/products-create/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/products-create/http-response.adoc[]
+
+include::{snippets}/products-create/response-fields.adoc[]
+
+=== 상품 목록 조회
+
+`GET /api/v1/products`
+
+==== Request
+
+include::{snippets}/products-search/http-request.adoc[]
+
+==== Response
+
+include::{snippets}/products-search/http-response.adoc[]
+
+include::{snippets}/products-search/response-fields.adoc[]
+
+=== 상품 상세 조회
+
+`GET /api/v1/products/{productId}`
+
+==== Request
+
+include::{snippets}/products-get/http-request.adoc[]
+
+include::{snippets}/products-get/path-parameters.adoc[]
+
+==== Response
+
+include::{snippets}/products-get/http-response.adoc[]
+
+include::{snippets}/products-get/response-fields.adoc[]
+
+=== 상품 수정 (SELLER)
+
+`PATCH /api/v1/products/{productId}`
+
+==== Request
+
+include::{snippets}/products-update/http-request.adoc[]
+
+include::{snippets}/products-update/request-headers.adoc[]
+
+include::{snippets}/products-update/path-parameters.adoc[]
+
+include::{snippets}/products-update/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/products-update/http-response.adoc[]
+
+include::{snippets}/products-update/response-fields.adoc[]
+
+=== 상품 삭제 (SELLER)
+
+`DELETE /api/v1/products/{productId}`
+
+==== Request
+
+include::{snippets}/products-delete/http-request.adoc[]
+
+include::{snippets}/products-delete/request-headers.adoc[]
+
+include::{snippets}/products-delete/path-parameters.adoc[]
+
+==== Response
+
+include::{snippets}/products-delete/http-response.adoc[]
+
+include::{snippets}/products-delete/response-fields.adoc[]
+
+=== 인기 상품 목록
+
+`GET /api/v1/products/popular`
+
+==== Request
+
+include::{snippets}/products-popular/http-request.adoc[]
+
+==== Response
+
+include::{snippets}/products-popular/http-response.adoc[]
+
+include::{snippets}/products-popular/response-fields.adoc[]
+
+== Orders
+
+=== 주문 생성 (BUYER)
+
+`POST /api/v1/orders`
+
+==== Request
+
+include::{snippets}/orders-create/http-request.adoc[]
+
+include::{snippets}/orders-create/request-headers.adoc[]
+
+include::{snippets}/orders-create/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/orders-create/http-response.adoc[]
+
+include::{snippets}/orders-create/response-fields.adoc[]
+
+=== 내 주문 목록
+
+`GET /api/v1/orders`
+
+==== Request
+
+include::{snippets}/orders-my-list/http-request.adoc[]
+
+include::{snippets}/orders-my-list/request-headers.adoc[]
+
+==== Response
+
+include::{snippets}/orders-my-list/http-response.adoc[]
+
+include::{snippets}/orders-my-list/response-fields.adoc[]
+
+=== 주문 상세 조회
+
+`GET /api/v1/orders/{orderId}`
+
+==== Request
+
+include::{snippets}/orders-get/http-request.adoc[]
+
+include::{snippets}/orders-get/request-headers.adoc[]
+
+include::{snippets}/orders-get/path-parameters.adoc[]
+
+==== Response
+
+include::{snippets}/orders-get/http-response.adoc[]
+
+include::{snippets}/orders-get/response-fields.adoc[]
+
+=== 주문 취소 (BUYER)
+
+`POST /api/v1/orders/{orderId}/cancel`
+
+==== Request
+
+include::{snippets}/orders-cancel/http-request.adoc[]
+
+include::{snippets}/orders-cancel/request-headers.adoc[]
+
+include::{snippets}/orders-cancel/path-parameters.adoc[]
+
+==== Response
+
+include::{snippets}/orders-cancel/http-response.adoc[]
+
+include::{snippets}/orders-cancel/response-fields.adoc[]
+
+=== 판매자 주문 목록 (SELLER)
+
+`GET /api/v1/sellers/orders`
+
+==== Request
+
+include::{snippets}/orders-seller-list/http-request.adoc[]
+
+include::{snippets}/orders-seller-list/request-headers.adoc[]
+
+==== Response
+
+include::{snippets}/orders-seller-list/http-response.adoc[]
+
+include::{snippets}/orders-seller-list/response-fields.adoc[]
+
+=== 배송 상태 변경 (SELLER)
+
+`PATCH /api/v1/sellers/orders/{orderId}/status`
+
+==== Request
+
+include::{snippets}/orders-seller-status-update/http-request.adoc[]
+
+include::{snippets}/orders-seller-status-update/request-headers.adoc[]
+
+include::{snippets}/orders-seller-status-update/path-parameters.adoc[]
+
+include::{snippets}/orders-seller-status-update/request-fields.adoc[]
+
+==== Response
+
+include::{snippets}/orders-seller-status-update/http-response.adoc[]
+
+include::{snippets}/orders-seller-status-update/response-fields.adoc[]

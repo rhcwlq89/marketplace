@@ -1,6 +1,9 @@
+import org.asciidoctor.gradle.jvm.AsciidoctorTask
+
 plugins {
     id("org.springframework.boot")
     id("io.spring.dependency-management")
+    id("org.asciidoctor.jvm.convert") version "4.0.4"
 }
 
 dependencies {
@@ -33,4 +36,25 @@ dependencies {
     // Test
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     testImplementation("org.springframework.security:spring-security-test")
+    testImplementation("org.springframework.restdocs:spring-restdocs-mockmvc")
+}
+
+val snippetsDir = layout.buildDirectory.dir("generated-snippets")
+
+tasks.test {
+    outputs.dir(snippetsDir)
+}
+
+tasks.named<AsciidoctorTask>("asciidoctor") {
+    inputs.dir(snippetsDir)
+    dependsOn(tasks.test)
+    attributes(
+        mapOf(
+            "snippets" to snippetsDir.get().asFile.absolutePath,
+            "source-highlighter" to "highlightjs",
+            "toc" to "left",
+            "toclevels" to 3,
+            "sectlinks" to true,
+        )
+    )
 }
